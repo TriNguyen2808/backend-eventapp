@@ -155,7 +155,6 @@ class EventTypeAdmin(admin.ModelAdmin):
 
 class UserPreferenceAdmin(admin.ModelAdmin):
     list_display = ('user_display',)  # Hiển thị tên người dùng
-    filter_horizontal = ('event_type',)  # Cho phép chọn nhiều category bằng giao diện đẹp hơn
 
     def user_display(self, obj):
         return str(obj.user)

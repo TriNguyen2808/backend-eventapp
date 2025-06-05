@@ -1,6 +1,6 @@
 from django.conf import settings
 from rest_framework.response import Response
-from . import serializers, paginators, perms
+from . import serializers, paginators, perms, filters
 from rest_framework.decorators import action
 from django.db.models import Count
 from rest_framework import viewsets, generics, status, parsers, permissions
@@ -30,7 +30,7 @@ from .models import (
 class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIView, generics.DestroyAPIView):
     serializer_class = serializers.EventDetailSerializer
     pagination_class = paginators.EventPaginator
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated()]
     def get_queryset(self):
         q = self.request.query_params.get("q")
         if q:
@@ -45,6 +45,7 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
             return [permissions.IsAuthenticated(), perms.IsOrganizer()]
         elif self.action in ['destroy']:
             return [perms.OwnerIsAuthenticated()]
+        return [permissions.IsAuthenticated()]
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -133,13 +134,19 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
 
     #Tim hang ve cua su kien
     @action(methods=['get'], detail=True)
-    def ticket_class(self, request, pk):
+    def ticketclasses(self, request, pk):
         event = self.get_object()
         if not event.active:
             return Response({"detail": "Event is not active."}, status=status.HTTP_404_NOT_FOUND)
 
         ticket_class = event.ticketclass_set.all()
-        return Response(serializers.TicketClassSerializer(ticket_class, many= True).data, status=status.HTTP_200_OK)
+        return Response({
+            "statusCode": 200,
+            "error": None,
+            "message": "Fetch all ticket classes",
+            "data": serializers.TicketClassSerializer(ticket_class, many= True).data
+        },
+            status=status.HTTP_200_OK)
 
     #Lọc danh sách comment của event
     @action(methods=['get'], detail=True)
@@ -189,36 +196,50 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
     @action(detail=False, methods=['get'], url_path='suggested', url_name='suggested-events')
     def suggested_events(self, request):
         user = request.user
-        if not user.is_authenticated:
-            return Response({"detail": "Authentication required."}, status=401)
 
         # Cập nhật UserPreference cho user
         event_type_counts = (
             Ticket.objects.filter(user=user)
-            .values('event__event_type')
+            .values('ticket_class__event__event_type')
             .annotate(total=Count('id'))
             .filter(total__gte=5)
         )
 
         if event_type_counts:
-            pref, _ = UserPreference.objects.get_or_create(user=user)
-            pref.preferred_categories.clear()
-            for item in event_type_counts:
-                if item['event__event_type']:
-                    pref.preferred_categories.add(item['event__event_type'])
-            pref.save()
+            # Xoá preferences cũ
+            UserPreference.objects.filter(user=user).delete()
 
-            # Gợi ý sự kiện theo sở thích
-            preferred_types = pref.preferred_categories.all()
+            # Tạo lại các preferences mới
+            for item in event_type_counts:
+                event_type_id = item['ticket_class__event__event_type']
+                if event_type_id:
+                    try:
+                        event_type = EventType.objects.get(pk=event_type_id)
+                        UserPreference.objects.create(user=user, event_type=event_type)
+                    except EventType.DoesNotExist:
+                        continue
+
+            # Gợi ý các sự kiện dựa trên preferences mới
+            preferred_types = UserPreference.objects.filter(user=user).values_list('event_type', flat=True)
             suggested_events = Event.objects.filter(
                 event_type__in=preferred_types,
                 active=True
             ).order_by('start_time')
 
             serializer = self.get_serializer(suggested_events, many=True)
-            return Response(serializer.data)
+            return Response({
+                "statusCode": 200,
+                "error": None,
+                "user": {
+                    "full_name": user.get_full_name(),
+                    "email": user.email,
+                    "preferred_event_types": [str(cat) for cat in preferred_types]
+                },
+                "message": "Suggested events based on your preferences",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
 
-        return Response({"message": "Không đủ dữ liệu để gợi ý."}, status=204)
+        return Response({"message": "Không đủ dữ liệu để gợi ý (số vé đặt quá ít <5)."}, status=status.HTTP_204_NO_CONTENT)
 
 
 #Xoa, Cap nhat nhan xet
@@ -412,25 +433,94 @@ class UserViewSet(viewsets.ViewSet,generics.CreateAPIView, generics.UpdateAPIVie
         })
 
 #Tạo hạng vé cho event (lọc theo id) events/<int:event_id>/add-ticket-class/
-class TicketClassViewSet(viewsets.ViewSet, generics.CreateAPIView):
+class TicketClassViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.UpdateAPIView, generics.DestroyAPIView):
+    queryset = TicketClass.objects.all()
     serializer_class = serializers.TicketClassSerializer
     permission_classes = [perms.IsOrganizer]
 
-    def create(self, request, event_id=None):
+    def create(self, request, *args, **kwargs):
+        event_id = self.kwargs.get('id')
         try:
             event = Event.objects.get(id=event_id)
         except Event.DoesNotExist:
-            return Response({'detail': 'Event not found'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({f"'detail': 'Event not found'{event_id}"}, status=status.HTTP_404_NOT_FOUND)
 
-        if event.user != request.user:
-            return Response({'detail': 'You are not the organizer of this event.'}, status=status.HTTP_403_FORBIDDEN)
+        if (event.user != request.user) and not request.user.is_superuser :
+            return Response({
+                'statusCode': 403,
+                'detail': 'Bạn không phải là người tổ chức sự kiện này.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        name = request.data.get('name', '').strip()
+        duplicate_ticket = TicketClass.objects.filter(event=event, name__iexact=name).first()
+        if TicketClass.objects.filter(event=event, name__iexact=name).exists():
+            return Response({
+                'statusCode': 400,
+                'error': 'Hạng vé với tên này đã tồn tại cho sự kiện.',
+                'event': event.name,
+                'duplicate_id': duplicate_ticket.id
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = self.serializer_class(data=request.data, context={'event': event})
 
         if serializer.is_valid():
             serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            return Response({
+                "statusCode": 201,
+                "error": None,
+                "message": "Tạo hạng vé thành công",
+                "user": request.user.get_full_name(),
+                "event": event.name,
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+
+        # Kiểm tra nếu người dùng không phải owner hoặc admin
+        if request.user != instance.event.user and not request.user.is_superuser:
+            return Response({
+                "detail": "Bạn không có quyền chỉnh sửa sự kiện này."
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+
+        response_data = {
+            "statusCode": 200,
+            "error": None,
+            "message": "Updated ticketclass",
+            "data": {
+                "ticket class": serializer.data,
+                "updatedAt": instance.updated_at.isoformat() if hasattr(instance,
+                                                                        'updated_at') and instance.updated_at else None,
+            }
+        }
+        return Response(response_data, status=status.HTTP_200_OK)
+
+
+
+    def destroy(self, request, *args, **kwargs):
+        try:
+            ticketclass = self.get_object()
+        except User.DoesNotExist:
+            return Response({"detail": "Không tìm thấy hạng vé."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not request.user.is_superuser:
+            return Response({
+                "detail": "Bạn không có quyền chỉnh sửa người dùng này."
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        ticketclass.delete()
+        return Response({
+            "statusCode": 204,
+            "message": "Xoá hạng vé thành công.",
+            "data": None
+        }, status=status.HTTP_204_NO_CONTENT)
 
 
 #Thong bao
@@ -472,7 +562,7 @@ class EventReminderViewSet(viewsets.GenericViewSet):
 class EventSearchView(viewsets.ViewSet, generics.ListAPIView):
     serializer_class = serializers.EventSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter]
-    filterset_fields = ['event_type']
+    filterset_class = filters.EventFilter
     search_fields = ['name', 'description']
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = paginators.EventPaginator
@@ -481,14 +571,20 @@ class EventSearchView(viewsets.ViewSet, generics.ListAPIView):
         return Event.objects.filter(active=True)
 
     def list(self, request):
-        queryset = self.filter_queryset(self.get_queryset())
+        initial_queryset = self.filter_queryset(self.get_queryset())
 
-        page = self.paginate_queryset(queryset)
+        # Lấy danh sách event_type xuất hiện trong queryset
+        event_type_ids = initial_queryset.values_list('event_type', flat=True).distinct()
+
+        # Chỉ giữ lại các sự kiện có event_type nằm trong danh sách trên
+        filtered_queryset = initial_queryset.filter(event_type__in=event_type_ids)
+
+        page = self.paginate_queryset(filtered_queryset)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
             return self.get_paginated_response(serializer.data)
 
-        serializer = self.get_serializer(queryset, many=True)
+        serializer = self.get_serializer(filtered_queryset, many=True)
         return Response(serializer.data)
 
 

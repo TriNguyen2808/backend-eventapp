@@ -68,9 +68,12 @@ class Event(models.Model):  # thong tin su kien
         unique_together = ('name', 'start_time')
 
 class UserPreference(models.Model):
-    user = models.OneToOneField(User, on_delete=models.CASCADE)
-    event_type = models.ManyToManyField(EventType)
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    event_type = models.ForeignKey(EventType, on_delete=models.CASCADE, null=True)
     created_at = models.DateTimeField(auto_now_add=True, null = True)
+
+    class Meta:
+        unique_together = ('user', 'event_type')
 
 class Interaction(models.Model):
     event = models.ForeignKey(Event, on_delete=models.CASCADE)
