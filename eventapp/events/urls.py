@@ -20,3 +20,5 @@ urlpatterns = [
     # path('momo/init/', views.MomoPaymentInitView.as_view()),
     # path('momo/callback/', views.MomoCallbackView.as_view()),
 ]
+
+#http://localhost:8000/accounts/login/

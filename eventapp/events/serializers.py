@@ -2,7 +2,7 @@ from django.template.context_processors import request
 from django.conf import settings
 from .models import (
     User, Event,TicketClass, Ticket, Payment, Notification, Rating,
-    Report, ChatMessage, EventSuggestion, DiscountCode, TicketDiscount, Like, Comment
+    Report, ChatMessage, EventSuggestion, DiscountCode, Like, Comment
 )
 from django.utils.timezone import now
 from datetime import datetime
@@ -13,8 +13,8 @@ class EventSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Event
-        fields = ['id', 'name', 'image', 'user', 'event_type', 'location', 'description', 'start_time', 'end_time','active']
-        read_only_fields = ['id','user', 'active']
+        fields = ['id', 'name', 'image', 'user', 'event_type', 'location', 'description', 'start_time', 'end_time','active', 'popularity_score']
+        read_only_fields = ['id','user', 'active', 'popularity_score']
 
     def get_image(self, event):
 
@@ -63,11 +63,11 @@ class EventDetailSerializer(EventSerializer):
         model = EventSerializer.Meta.model
         fields = EventSerializer.Meta.fields + ['liked']
 
-
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['first_name','last_name','avatar','email','username','password','role']
+        fields = ['first_name','last_name','avatar','email','username','password','role', 'group']
+        read_only_fields = ['group']
         extra_kwargs ={
             'password':{
                 'write_only': True

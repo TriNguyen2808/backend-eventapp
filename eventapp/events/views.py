@@ -22,7 +22,7 @@ from django.db.models.functions import Concat
 from .momo import create_momo_payment
 from .models import (
     User, Event,TicketClass, Ticket, Payment, Notification, Rating,
-    Report, ChatMessage, EventSuggestion, DiscountCode, TicketDiscount, Like, Comment, UserPreference, EventType
+    Report, ChatMessage, EventSuggestion, DiscountCode, Like, Comment, UserPreference, EventType
 )
 
 
@@ -117,6 +117,8 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
     @action(methods=['post'], url_path='comments', detail=True)
     def add_comment(self, request, pk):
         c = Comment.objects.create(user=request.user, event=self.get_object(), content=request.data.get('content'))
+        event = Event.objects.get(pk=pk)
+        event.update_popularity()
         response_data = {
             "statusCode": 201,
             "error": None,
@@ -241,6 +243,17 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
 
         return Response({"message": "Không đủ dữ liệu để gợi ý (số vé đặt quá ít <5)."}, status=status.HTTP_204_NO_CONTENT)
 
+    @action(detail=False, methods=['get'], url_path='hot', url_name='hot-events')
+    def hot_events(self, request):
+        hot_events = Event.objects.filter(active=True).order_by('-popularity_score')[:10]
+        serializer = self.get_serializer(hot_events, many=True)
+        return Response({
+            "statusCode": 200,
+            "error": None,
+            "message": "hot events",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+
 
 #Xoa, Cap nhat nhan xet
 from rest_framework.response import Response
@@ -354,6 +367,10 @@ class UserViewSet(viewsets.ViewSet,generics.CreateAPIView, generics.UpdateAPIVie
     parser_classes = [parsers.MultiPartParser]
     pagination_class = paginators.EventPaginator
     permission_classes = [permissions.IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ['create']:
+            return [permissions.AllowAny()]
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
@@ -612,6 +629,7 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView):
         ticket = serializer.save()
         user = request.user
         event = ticket.ticket_class.event
+        event.update_popularity()
 
         qr_file_path = serializers.TicketSerializer.create_qr_image(ticket.ticket_code)
 

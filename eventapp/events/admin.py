@@ -7,7 +7,7 @@ from django import forms
 from ckeditor_uploader.widgets import CKEditorUploadingWidget
 from .models import (
     Role, Event,TicketClass, Ticket, Payment, Notification, Rating,
-    Report, ChatMessage, EventSuggestion, DiscountCode, TicketDiscount, Comment, Like, EventType, UserPreference
+    Report, ChatMessage, EventSuggestion, DiscountCode, Comment, Like, EventType, UserPreference
 )
 
 User = get_user_model()
@@ -121,15 +121,10 @@ class EventSuggestionAdmin(admin.ModelAdmin):
     list_filter = ['preferred_type']
 
 
-class DiscountCodeAdmin(admin.ModelAdmin):
-    list_display = ['id', 'code', 'discount_percent', 'valid_from', 'valid_to', 'usage_limit']
-    list_editable = ['usage_limit']
-    search_fields = ['code']
-
-
-class TicketDiscountAdmin(admin.ModelAdmin):
-    list_display = ['id', 'ticket', 'discount', 'applied_at']
-    autocomplete_fields = ['ticket', 'discount']
+# class DiscountCodeAdmin(admin.ModelAdmin):
+#     list_display = ['id', 'code', 'discount_percent', 'valid_from', 'valid_to', 'usage_limit']
+#     list_editable = ['usage_limit']
+#     search_fields = ['code']
 
 class CommentAdmin(admin.ModelAdmin):
     list_display = ('id', 'event', 'user', 'content', 'created_at')
@@ -171,8 +166,7 @@ admin.site.register(Rating, RatingAdmin)
 admin.site.register(Report, ReportAdmin)
 #admin.site.register(ChatMessage, ChatMessageAdmin)
 admin.site.register(EventSuggestion, EventSuggestionAdmin)
-admin.site.register(DiscountCode, DiscountCodeAdmin)
-admin.site.register(TicketDiscount, TicketDiscountAdmin)
+#admin.site.register(DiscountCode, DiscountCodeAdmin)
 admin.site.register(Comment, CommentAdmin)
 admin.site.register(Like, LikeAdmin)
 admin.site.register(EventType, EventTypeAdmin)

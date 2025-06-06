@@ -19,15 +19,27 @@ class Role(models.Model):  # phan quyen
         return self.name
 
 
+class CustomerGroup(models.Model):
+    name = models.CharField(max_length=100)
+    description = models.TextField(blank=True)
+    spending_goal = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    def __str__(self):
+        return self.name
+
+
 class User(AbstractUser):  # nguoi dung
     email = models.EmailField(unique=True)  # email la duy nhat
     avatar = CloudinaryField('avatar', null=True)
     created_at = models.DateTimeField(auto_now_add=True)  # thoi gian tao
     updated_at = models.DateTimeField(auto_now=True)  # thoi gian cap nhat
     role = models.ForeignKey(Role, on_delete=models.CASCADE, default=3)
+    group = models.ForeignKey(CustomerGroup, on_delete=models.CASCADE, default=1)
 
     def __str__(self):
         return self.username
+
+    def update_group(self):
+        pass
 
     class Meta:
         ordering = ['-created_at']
@@ -59,9 +71,17 @@ class Event(models.Model):  # thong tin su kien
     active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)  # thoi gian tao su kien
     updated_at = models.DateTimeField(auto_now=True)  # thoi gian update su
+    popularity_score = models.FloatField(default=0)
 
     def __str__(self):
         return self.name
+
+    def update_popularity(self):
+        ticket_count = Ticket.objects.filter(ticket_class__event=self).count()
+        like_count = self.like_set.count()
+        comment_count = self.comment_set.count()
+        self.popularity_score = ticket_count * 1.5 + like_count + comment_count * 0.5
+        self.save()
 
     class Meta:
         ordering = ['name']
@@ -89,7 +109,7 @@ class TicketClass(models.Model):
         STANDING = 'STANDING'
         SEATED = 'SEATED'
 
-    event = models.ForeignKey(Event, on_delete=models.CASCADE)  # Su kien lien ket
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='ticketclasses')  # Su kien lien ket
     name = models.CharField(max_length=100)  # Ten hang ve (VIP, Standard, Economy)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0)  # Gia ve
     type = models.CharField(max_length=20, choices=TicketType.choices, default='STANDING')  # Loai ve
@@ -105,7 +125,7 @@ class TicketClass(models.Model):
 
 class Ticket(models.Model):
 
-    ticket_class = models.ForeignKey(TicketClass, on_delete=models.CASCADE, null=True)  # Hang ve da chon
+    ticket_class = models.ForeignKey(TicketClass, on_delete=models.CASCADE, null=True, related_name='tickets')  # Hang ve da chon
     user = models.ForeignKey(User, on_delete=models.CASCADE)  # Nguoi mua ve
     ticket_code = models.CharField(max_length=100, unique=True)
     price_paid = models.DecimalField(max_digits=10, decimal_places=2, blank=True)  # Cho phép để trống ban đầu
@@ -219,20 +239,27 @@ class EventSuggestion(models.Model):  # goi y su kien theo so thich
     preferred_type = models.CharField(max_length=20, choices=PreferenceType.choices)  # so thich su kien
     created_at = models.DateTimeField(auto_now_add=True)  # thoi gian tao goi y
 
+class DiscountType(models.Model):
+    name = models.CharField(max_length=20, unique=True)  # 'FIXED', 'PERCENTAGE'
+    description = models.CharField(max_length=255)       # 'Giảm theo số tiền', 'Giảm theo %'
 
-class DiscountCode(models.Model):  # ma giam gia
-    code = models.CharField(max_length=50, unique=True)  # ma giam gia
-    discount_percent = models.PositiveIntegerField()  # phan tram giam gia
+    def __str__(self):
+        return self.name
+
+class DiscountCode(models.Model):
+    code = models.CharField(max_length=50, unique=True)
+    description = models.TextField(blank=True)
     valid_from = models.DateField(null=True, blank=True)  # ngay bat dau hieu luc
     valid_to = models.DateField(null=True, blank=True)  # ngay het hieu luc
-    target_group = models.CharField(max_length=50)  # nhom doi tuong ap dung
-    usage_limit = models.IntegerField(default=1)  # so lan su dung toi da
+    groups = models.ManyToManyField(CustomerGroup, related_name='discount_codes')
+    max_usage = models.PositiveIntegerField(default=1)
+    discount_type = models.ForeignKey(DiscountType, on_delete=models.CASCADE, related_name='discount_types', null=True)
+    discount_value = models.FloatField(default=0)
+    limit_discount = models.BooleanField(default=False)
+    max_discount_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    min_total_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    events = models.ManyToManyField(Event, blank=True)
+    used_by = models.ManyToManyField(User, related_name='used_discounts', blank=True)
 
     def __str__(self):
         return self.code
-
-
-class TicketDiscount(models.Model):  # ve duoc ap dung ma giam
-    ticket = models.ForeignKey(Ticket, on_delete=models.CASCADE)  # ve duoc ap ma
-    discount = models.ForeignKey(DiscountCode, on_delete=models.CASCADE)  # ma giam gia
-    applied_at = models.DateTimeField(auto_now_add=True)  # thoi gian ap dung
