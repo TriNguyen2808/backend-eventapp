@@ -1,8 +1,8 @@
 from django.conf import settings
 from rest_framework.response import Response
-from . import serializers, paginators, perms, filters
+from . import serializers, paginators, perms, filters, vnpay
 from rest_framework.decorators import action
-from django.db.models import Count
+from django.db.models import Count, Min, Max
 from rest_framework import viewsets, generics, status, parsers, permissions
 from django.utils.timezone import now
 from datetime import timedelta
@@ -12,32 +12,38 @@ from rest_framework.filters import SearchFilter
 from django.db import transaction
 from oauth2_provider.views import TokenView
 from django.http import JsonResponse
+from django.shortcuts import get_object_or_404
+import hmac, hashlib
 from oauth2_provider.models import AccessToken
 from django.utils import timezone
 import qrcode
 from io import BytesIO
 import uuid, json
-from django.db.models import Value, CharField
+from django.db.models import Value, CharField, Sum
 from django.db.models.functions import Concat
 from .momo import create_momo_payment
+from django.db import transaction
+from decimal import Decimal
+from django.db.models.functions import TruncMonth, TruncYear
 from .models import (
-    User, Event,TicketClass, Ticket, Payment, Notification, Rating,
-    Report, ChatMessage, EventSuggestion, DiscountCode, Like, Comment, UserPreference, EventType
+    CustomerGroup, User, Event, TicketClass, Ticket, PaymentLog, Notification, Rating,
+    Report, ChatMessage, EventSuggestion, DiscountType, DiscountCode, Like, Comment, UserPreference, EventType
 )
 
 
-#Event.
+# Event.
 class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIView, generics.DestroyAPIView):
     serializer_class = serializers.EventDetailSerializer
     pagination_class = paginators.EventPaginator
     permission_classes = [permissions.IsAuthenticated()]
+
     def get_queryset(self):
         q = self.request.query_params.get("q")
         if q:
             return Event.objects.filter(active=True, name__icontains=q)
         return Event.objects.filter(active=True)
 
-    #Chung thuc
+    # Chung thuc
     def get_permissions(self):
         if self.action in ['add_comment', 'like']:
             return [permissions.IsAuthenticated(), perms.IsAttendee()]
@@ -52,14 +58,15 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
             return serializers.EventSerializer
         return serializers.EventDetailSerializer
 
-    #Like event
+    # Like event
     @action(methods=['post'], url_path='like', detail=True)
     def like(self, request, pk):
         like, created = Like.objects.get_or_create(user=request.user, event=self.get_object())
         if not created:
             like.active = not like.active
             like.save()
-        return Response(serializers.EventDetailSerializer(self.get_object(),context={'request':request}).data, status=status.HTTP_200_OK)
+        return Response(serializers.EventDetailSerializer(self.get_object(), context={'request': request}).data,
+                        status=status.HTTP_200_OK)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -112,8 +119,7 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
             "data": None
         }, status=status.HTTP_204_NO_CONTENT)
 
-
-    #Nhan xet su kien
+    # Nhan xet su kien
     @action(methods=['post'], url_path='comments', detail=True)
     def add_comment(self, request, pk):
         c = Comment.objects.create(user=request.user, event=self.get_object(), content=request.data.get('content'))
@@ -134,7 +140,7 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
         }
         return Response(response_data, status=status.HTTP_201_CREATED)
 
-    #Tim hang ve cua su kien
+    # Tim hang ve cua su kien
     @action(methods=['get'], detail=True)
     def ticketclasses(self, request, pk):
         event = self.get_object()
@@ -146,11 +152,11 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
             "statusCode": 200,
             "error": None,
             "message": "Fetch all ticket classes",
-            "data": serializers.TicketClassSerializer(ticket_class, many= True).data
+            "data": serializers.TicketClassSerializer(ticket_class, many=True).data
         },
             status=status.HTTP_200_OK)
 
-    #Lọc danh sách comment của event
+    # Lọc danh sách comment của event
     @action(methods=['get'], detail=True)
     def list_comments(self, request, pk):
         event = self.get_object()
@@ -241,11 +247,12 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
                 "data": serializer.data
             }, status=status.HTTP_200_OK)
 
-        return Response({"message": "Không đủ dữ liệu để gợi ý (số vé đặt quá ít <5)."}, status=status.HTTP_204_NO_CONTENT)
+        return Response({"message": "Không đủ dữ liệu để gợi ý (số vé đặt quá ít <5)."},
+                        status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=False, methods=['get'], url_path='hot', url_name='hot-events')
     def hot_events(self, request):
-        hot_events = Event.objects.filter(active=True).order_by('-popularity_score')[:10]
+        hot_events = Event.objects.filter(active=True).order_by('-popularity_score')[:5]
         serializer = self.get_serializer(hot_events, many=True)
         return Response({
             "statusCode": 200,
@@ -254,10 +261,49 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
             "data": serializer.data
         }, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=['get'], url_path='search')
+    def search(self, request):
+        queryset = Event.objects.filter(active=True)
+        today = now().date()
+        period = request.query_params.get('period')
+        name = request.query_params.get('name')
+        event_type = request.query_params.get('event_type')
+        min_price = request.query_params.get('min_price')
+        max_price = request.query_params.get('max_price')
 
-#Xoa, Cap nhat nhan xet
+        if period == 'today':
+            queryset = Event.objects.filter(start_time__date=today)
+        elif period == 'week':
+            start = today
+            end = today + timedelta(days=7)
+            queryset = Event.objects.filter(start_time__date__range=(start, end))
+        elif period == 'month':
+            start = today.replace(day=1)
+            end = (start + timedelta(days=31)).replace(day=1) - timedelta(days=1)
+            queryset = Event.objects.filter(start_time__date__range=(start, end))
+
+        if name:
+            queryset = Event.objects.filter(name__icontains=name)
+
+        if event_type:
+            queryset = queryset.filter(event_type__name__iexact=event_type)
+
+        if min_price or max_price:
+            #queryset = queryset.annotate(min=Min('ticketclass__price'))
+
+            if min_price:
+                queryset = queryset.filter(ticketclasses__price__gte=min_price)
+            if max_price:
+                queryset = queryset.filter(ticketclasses__price__lte=max_price)
+        if queryset:
+            serializer = self.get_serializer(queryset.distinct(), many=True)
+            return Response(serializer.data)
+        return Response("khong co su kien", status=status.HTTP_400_BAD_REQUEST)
+
+# Xoa, Cap nhat nhan xet
 from rest_framework.response import Response
 from rest_framework import status
+
 
 class CommentViewSet(viewsets.ViewSet, generics.DestroyAPIView, generics.UpdateAPIView, generics.ListAPIView):
     queryset = Comment.objects.all()
@@ -360,13 +406,13 @@ class CommentViewSet(viewsets.ViewSet, generics.DestroyAPIView, generics.UpdateA
         })
 
 
-
-class UserViewSet(viewsets.ViewSet,generics.CreateAPIView, generics.UpdateAPIView, generics.DestroyAPIView):
+class UserViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.UpdateAPIView, generics.DestroyAPIView):
     queryset = User.objects.filter(is_active=True).all()
     serializer_class = serializers.UserSerializer
     parser_classes = [parsers.MultiPartParser]
     pagination_class = paginators.EventPaginator
-    permission_classes = [permissions.IsAuthenticated]
+
+    # permission_classes = [permissions.IsAuthenticated]
 
     def get_permissions(self):
         if self.action in ['create']:
@@ -449,7 +495,8 @@ class UserViewSet(viewsets.ViewSet,generics.CreateAPIView, generics.UpdateAPIVie
             "data": serializer.data
         })
 
-#Tạo hạng vé cho event (lọc theo id) events/<int:event_id>/add-ticket-class/
+
+# Tạo hạng vé cho event (lọc theo id) events/<int:event_id>/add-ticket-class/
 class TicketClassViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.UpdateAPIView, generics.DestroyAPIView):
     queryset = TicketClass.objects.all()
     serializer_class = serializers.TicketClassSerializer
@@ -462,7 +509,7 @@ class TicketClassViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.Upda
         except Event.DoesNotExist:
             return Response({f"'detail': 'Event not found'{event_id}"}, status=status.HTTP_404_NOT_FOUND)
 
-        if (event.user != request.user) and not request.user.is_superuser :
+        if (event.user != request.user) and not request.user.is_superuser:
             return Response({
                 'statusCode': 403,
                 'detail': 'Bạn không phải là người tổ chức sự kiện này.'
@@ -492,7 +539,6 @@ class TicketClassViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.Upda
             }, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
@@ -519,12 +565,10 @@ class TicketClassViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.Upda
         }
         return Response(response_data, status=status.HTTP_200_OK)
 
-
-
     def destroy(self, request, *args, **kwargs):
         try:
             ticketclass = self.get_object()
-        except User.DoesNotExist:
+        except TicketClass.DoesNotExist:
             return Response({"detail": "Không tìm thấy hạng vé."}, status=status.HTTP_404_NOT_FOUND)
 
         if not request.user.is_superuser:
@@ -540,7 +584,7 @@ class TicketClassViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.Upda
         }, status=status.HTTP_204_NO_CONTENT)
 
 
-#Thong bao
+# Thong bao
 class EventReminderViewSet(viewsets.GenericViewSet):
     permission_classes = [perms.IsAdmin]
 
@@ -571,41 +615,41 @@ class EventReminderViewSet(viewsets.GenericViewSet):
                     )
                 sent_count += 1
 
-
-        return Response({"message": f"Đã gửi {sent_count} email nhắc nhở thành công. {target_date}"}, status=status.HTTP_200_OK)
-
-
-#Tìm sự kiện theo loại (có sẵn), và theo tên, mô tả (có chứa hoặc gần đúng)
-class EventSearchView(viewsets.ViewSet, generics.ListAPIView):
-    serializer_class = serializers.EventSerializer
-    filter_backends = [DjangoFilterBackend, SearchFilter]
-    filterset_class = filters.EventFilter
-    search_fields = ['name', 'description']
-    permission_classes = [permissions.IsAuthenticated]
-    pagination_class = paginators.EventPaginator
-
-    def get_queryset(self):
-        return Event.objects.filter(active=True)
-
-    def list(self, request):
-        initial_queryset = self.filter_queryset(self.get_queryset())
-
-        # Lấy danh sách event_type xuất hiện trong queryset
-        event_type_ids = initial_queryset.values_list('event_type', flat=True).distinct()
-
-        # Chỉ giữ lại các sự kiện có event_type nằm trong danh sách trên
-        filtered_queryset = initial_queryset.filter(event_type__in=event_type_ids)
-
-        page = self.paginate_queryset(filtered_queryset)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-
-        serializer = self.get_serializer(filtered_queryset, many=True)
-        return Response(serializer.data)
+        return Response({"message": f"Đã gửi {sent_count} email nhắc nhở thành công. {target_date}"},
+                        status=status.HTTP_200_OK)
 
 
-#Dat ve
+# Tìm sự kiện theo loại (có sẵn), và theo tên, mô tả (có chứa hoặc gần đúng)
+# class EventSearchView(viewsets.ViewSet, generics.ListAPIView):
+#     serializer_class = serializers.EventSerializer
+#     filter_backends = [DjangoFilterBackend, SearchFilter]
+#     filterset_class = filters.EventFilter
+#     search_fields = ['name', 'description']
+#     permission_classes = [permissions.IsAuthenticated]
+#     pagination_class = paginators.EventPaginator
+#
+#     def get_queryset(self):
+#         return Event.objects.filter(active=True)
+#
+#     def list(self, request):
+#         initial_queryset = self.filter_queryset(self.get_queryset())
+#
+#         # Lấy danh sách event_type xuất hiện trong queryset
+#         event_type_ids = initial_queryset.values_list('event_type', flat=True).distinct()
+#
+#         # Chỉ giữ lại các sự kiện có event_type nằm trong danh sách trên
+#         filtered_queryset = initial_queryset.filter(event_type__in=event_type_ids)
+#
+#         page = self.paginate_queryset(filtered_queryset)
+#         if page is not None:
+#             serializer = self.get_serializer(page, many=True)
+#             return self.get_paginated_response(serializer.data)
+#
+#         serializer = self.get_serializer(filtered_queryset, many=True)
+#         return Response(serializer.data)
+
+
+# Dat ve
 class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView):
     serializer_class = serializers.TicketSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -617,50 +661,85 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView):
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
-        # Truyền context để dùng request.user trong serializer
         serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
+        validated_data = serializer.validated_data
 
-        # Kiểm tra đã thanh toán chưa
-        # if not request.data.get('payment_confirmed', False):
-        #     return Response({"error": "Bạn cần thanh toán trước qua MoMo hoặc VNPAY."},
-        #                     status=status.HTTP_400_BAD_REQUEST)
-
-        ticket = serializer.save()
         user = request.user
-        event = ticket.ticket_class.event
-        event.update_popularity()
+        ticket_class = validated_data['ticket_class']
+        event = ticket_class.event
+        discount_code_str = request.data.get('discount_code')
+        price_paid = ticket_class.price  # default
 
-        qr_file_path = serializers.TicketSerializer.create_qr_image(ticket.ticket_code)
+        # Áp dụng mã giảm giá nếu có
+        if discount_code_str:
+            try:
+                discount = DiscountCode.objects.get(code=discount_code_str, valid_from__lte=now(),
+                                                    valid_to__gte=now())
+            except DiscountCode.DoesNotExist:
+                return Response({
+                    "statusCode": 400,
+                    "error": "Mã giảm giá không hợp lệ hoặc đã hết hạn."
+                }, status=status.HTTP_400_BAD_REQUEST)
 
-        # Soạn email có file đính kèm QR
-        email = EmailMessage(
-            subject=f"[Đặt vé thành công] {event.name}",
-            body=(
-                f"Xin chào {user.get_full_name() or user.username},\n\n"
-                f"Bạn đã đặt vé thành công cho sự kiện: {event.name}.\n"
-                f"Thời gian: {event.start_time.strftime('%H:%M %d/%m/%Y')}\n"
-                f"Mã vé của bạn: {ticket.ticket_code}\n\n"
-                "Hãy đem mã QR đính kèm để check-in tại sự kiện.\n\n"
-                "Cảm ơn bạn đã sử dụng hệ thống!"
-            ),
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            to=[user.email],
+            # Kiểm tra người dùng đã dùng mã chưa
+            if discount.used_by.filter(id=user.id).exists():
+                return Response({
+                    "statusCode": 400,
+                    "error": "Bạn đã sử dụng mã giảm giá này rồi."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Kiểm tra sự kiện
+            if discount.events.exists() and event not in discount.events.all():
+                return Response({
+                    "statusCode": 400,
+                    "error": "Mã này không áp dụng cho sự kiện này."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Kiểm tra nhóm
+            if not discount.groups.filter(id=user.group.id).exists():
+                return Response({
+                    "statusCode": 400,
+                    "error": "Bạn không thuộc nhóm được áp dụng mã này."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Tính giá sau giảm
+            if discount.discount_type.name == 'AMOUNT':
+                price_paid = max(price_paid - discount.discount_value, 0)
+            else:  # PERCENTAGE
+                percentage_discount = price_paid * Decimal(discount.discount_value) / Decimal(100)
+                if discount.limit_discount and discount.max_discount_amount:
+                    percentage_discount = min(percentage_discount, discount.max_discount_amount)
+                price_paid = max(price_paid - percentage_discount, 0)
+
+        # Tạo bản ghi tạm PaymentLog để lưu đơn chưa thanh toán
+        payment_log = PaymentLog.objects.create(
+            user=user,
+            ticket_class=ticket_class,
+            amount=price_paid,
+            discount_code=discount if discount_code_str else None,
+            status='pending',
+        )
+        amount_vnpay = int(price_paid * 100)
+        # Tạo link thanh toán
+        vnp_url = vnpay.build_vnpay_url(
+            order_id=payment_log.id,
+            amount=amount_vnpay,  # Truyền amount đã nhân 100
+            return_url=settings.VNPAY_RETURN_URL,
+            ip_address=request.META.get('REMOTE_ADDR', '127.0.0.1'),  # Thêm fallback cho IP
+            order_desc= "Thanh toan ve su kien"  # Không dấu để tránh lỗi encoding
         )
 
-        # Đính kèm QR vào email
-        with open(qr_file_path, 'rb') as qr_file:
-            email.attach(f'{ticket.ticket_code}.png', qr_file.read(), 'image/png')
-
-        email.send()
-
         return Response({
-            "message": "Đặt vé thành công. Mã QR đã được gửi qua email.",
-            "ticket_code": ticket.ticket_code
-        }, status=status.HTTP_201_CREATED)
+            "statusCode": 200,
+            "message": "Vui lòng thanh toán qua VNPay.",
+            "payment_url": vnp_url
+        })
 
 
-    #check in
+
+
+    # check in
     @action(detail=False, methods=['post'], url_path='check-in')
     def check_in(self, request):
         ticket_code = request.data.get("ticket_code")
@@ -678,7 +757,9 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView):
 
         event = ticket.ticket_class.event
         if event.start_time > now():
-            return Response(f'error: Sự kiện chưa bắt đầu. Ngày bắt đầu sự kiện: {event.start_time}, Ngày hiện tại: {now()}',status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                f'error: Sự kiện chưa bắt đầu. Ngày bắt đầu sự kiện: {event.start_time}, Ngày hiện tại: {now()}',
+                status=status.HTTP_400_BAD_REQUEST)
 
         # Cập nhật trạng thái check-in
         ticket.is_checked_in = True
@@ -693,6 +774,108 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView):
             "ticket_class": ticket.ticket_class.name,
             "check_in_time": ticket.check_in_time,
         }, status=status.HTTP_200_OK)
+
+
+class VNPayViewSet(viewsets.ViewSet):
+    @action(detail=False, methods=['get'], url_path='vnpay-return')
+    def vnpay_return(self, request):
+        params = request.query_params
+        order_id = params.get('vnp_TxnRef')
+        secure_hash = params.get('vnp_SecureHash')
+
+        # 1. Kiểm tra hash hợp lệ
+        params_dict = dict(params)
+        params_dict.pop('vnp_SecureHash', None)
+        params_dict = {k: v for k, v in params_dict.items()}
+
+        hash_string = '&'.join(f"{k}={v}" for k, v in sorted(params_dict.items()))
+        expected_hash = hmac.new(
+            settings.VNPAY_HASH_SECRET_KEY.encode(),
+            hash_string.encode(),
+            hashlib.sha512
+        ).hexdigest()
+
+        if expected_hash != secure_hash:
+            print(expected_hash)
+            print('\n')
+            print(secure_hash)
+            print('\n')
+            print(order_id)
+            return Response({"error": "Xác thực VNPay thất bại"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 2. Kiểm tra trạng thái giao dịch
+        if params.get('vnp_ResponseCode') != '00':
+            return Response({"error": "Giao dịch không thành công"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 3. Tìm đơn và tạo vé
+        with transaction.atomic():
+            payment_log = get_object_or_404(PaymentLog, id=order_id, status='pending')
+
+            # Đánh dấu thanh toán thành công
+            payment_log.status = 'success'
+            payment_log.transaction_id = params.get('vnp_TransactionNo')  # hoặc vnp_TransactionStatus
+            payment_log.save()
+
+            # Tạo vé tương ứng
+            ticket = Ticket.objects.create(
+                user=payment_log.user,
+                ticket_class=payment_log.ticket_class,
+                price_paid=payment_log.amount
+            )
+            payment_log.ticket = ticket
+            payment_log.save(update_fields=['ticket'])
+
+            user = request.user
+            event = ticket.ticket_class.event
+
+            # Đánh dấu đã dùng mã
+            if payment_log.discount_code:
+                payment_log.discount_code.used_by.add(payment_log.user)
+
+            # Cập nhật độ phổ biến
+            ticket.ticket_class.event.update_popularity()
+
+            # Cập nhật nhóm của người dùng
+            payment_log.user.update_group()
+
+            # Gửi email (có thể giữ nguyên đoạn email của bạn trước đó)
+            qr_file_path = serializers.TicketSerializer.create_qr_image(ticket.ticket_code)
+            email = EmailMessage(
+                subject=f"[Đặt vé thành công] {event.name}",
+                body=(
+                    f"Xin chào {user.get_full_name() or user.username},\n\n"
+                    f"Bạn đã đặt vé thành công cho sự kiện: {event.name}.\n"
+                    f"Thời gian: {event.start_time.strftime('%H:%M %d/%m/%Y')}\n"
+                    f"Mã vé của bạn: {ticket.ticket_code}\n\n"
+                    "Hãy đem mã QR đính kèm để check-in tại sự kiện.\n\n"
+                    "Cảm ơn bạn đã sử dụng hệ thống!"
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                to=[user.email],
+            )
+            with open(qr_file_path, 'rb') as qr_file:
+                email.attach(f'{ticket.ticket_code}.png', qr_file.read(), 'image/png')
+            email.send()
+
+            return Response({
+                "statusCode": 200,
+                "error": None,
+                "message": "Đặt vé thành công. Mã QR đã được gửi qua email.",
+                "data": {
+                    "ticket_code": ticket.ticket_code,
+                    "ticketclass_price": ticket.ticket_class.price,
+                    "discount": ticket.ticket_class.price - ticket.price_paid,
+                    "price_paid": float(ticket.price_paid),
+                    "book_at": ticket.booked_at,
+                    "info user": {
+                        "name": ticket.user.get_full_name(),
+                        "email": ticket.user.email,
+                        "user's group": ticket.user.group.name
+                    }
+
+                }
+            }, status=status.HTTP_201_CREATED)
+
 
 class MomoPaymentInitView(viewsets.ViewSet):
     permission_classes = [permissions.IsAuthenticated]
@@ -755,6 +938,7 @@ class MomoCallbackView(viewsets.ViewSet):
         else:
             return Response({"message": "Thanh toán thất bại."}, status=status.HTTP_400_BAD_REQUEST)
 
+
 class CustomTokenView(TokenView):
     def post(self, request, *args, **kwargs):
         # Gọi logic mặc định để lấy token
@@ -781,6 +965,7 @@ class CustomTokenView(TokenView):
                         "id": user.id if user else None,
                         "email": user.email if user else None,
                         "name": user.get_full_name() or user.username if user else None,
+                        "role": user.role.name
                     }
                 },
                 "access_token": data.get("access_token")
@@ -789,3 +974,211 @@ class CustomTokenView(TokenView):
 
         return response
 
+
+class DiscountTypeViewSet(viewsets.ModelViewSet):
+    queryset = DiscountType.objects.all()
+    serializer_class = serializers.DiscountTypeSerializer
+    permission_classes = [perms.IsAdmin]
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            "statusCode": 200,
+            "error": None,
+            "message": "Danh sách loại mã giảm giá",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "statusCode": 201,
+                "error": None,
+                "message": "Tạo loại mã giảm giá thành công",
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED)
+        return Response({
+            "statusCode": 400,
+            "message": "Tạo loại mã giảm giá thất bại",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response({
+            "statusCode": 200,
+            "message": "Chi tiết loại mã giảm giá",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                "statusCode": 200,
+                "message": "Cập nhật loại mã giảm giá thành công",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+        return Response({
+            "message": "Cập nhật loại mã giảm giá thất bại",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    def destroy(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+        except DiscountType.DoesNotExist:
+            return Response({
+                "statusCode": 404,
+                "error": "Event not found.",
+                "message": "Không tìm thấy sự kiện.",
+                "data": None,
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        instance.delete()
+        return Response({
+            "statusCode": 200,
+            "message": "Xóa loại mã giảm giá thành công",
+            "data": None
+        }, status=status.HTTP_204_NO_CONTENT)
+
+
+class DiscountCodeViewSet(viewsets.ViewSet, generics.CreateAPIView):
+    queryset = DiscountCode.objects.all()
+    serializer_class = serializers.DiscountCodeSerializer
+    permission_classes = [perms.IsAdmin]
+
+    def create(self, request, *args, **kwargs):
+        data = request.data.copy()
+        # Nếu không gửi field events hoặc gửi rỗng thì tự động thêm tất cả sự kiện
+        if not data.get("events"):
+            all_event_ids = list(Event.objects.values_list('id', flat=True))
+            data['events'] = all_event_ids
+
+        if not data.get("groups"):
+            all_groups_ids = list(CustomerGroup.objects.values_list('id', flat=True))
+            data['groups'] = all_groups_ids
+
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+
+        return Response({
+            "statusCode": 201,
+            "error": None,
+            "message": "Tạo mã giảm giá thành công",
+            "user": request.user.id,
+            "data": serializer.data
+        }, status=status.HTTP_201_CREATED)
+
+
+            # Thống kê bình luận theo năm
+
+
+
+
+class ReportViewSet(viewsets.ViewSet):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_filtered_events(self, user):
+        if user.role.id == 1:  # Admin
+            return Event.objects.all()
+        elif user.role.id == 2:  # Organizer
+            return Event.objects.filter(organizer=user)
+        return Event.objects.none()
+
+    @action(detail=False, methods=['get'], url_path='monthly')
+    def report_by_month(self, request):
+        try:
+            year = int(request.query_params.get('year'))
+            month = int(request.query_params.get('month'))
+        except (TypeError, ValueError):
+            return Response({"error": "Vui lòng cung cấp đúng định dạng ?year=YYYY&month=MM"}, status=400)
+
+        user = request.user
+        events = self.get_filtered_events(user).filter(start_time__year=year, start_time__month=month)
+
+        data = []
+
+        for event in events:
+            ticket_count = Ticket.objects.filter(
+                ticket_class__event=event,
+                booked_at__year=year,
+                booked_at__month=month
+            ).count()
+
+            revenue_sum = Ticket.objects.filter(
+                ticket_class__event=event,
+                booked_at__year=year,
+                booked_at__month=month
+            ).aggregate(total=Sum('price_paid'))['total'] or 0
+
+            comment_count = Comment.objects.filter(
+                event=event,
+                created_at__year=year,
+                created_at__month=month
+            ).count()
+
+            data.append({
+                'event_id': event.id,
+                'event_name': event.name,
+                'total_tickets': ticket_count,
+                'total_revenue': revenue_sum,
+                'total_comments': comment_count
+            })
+
+        return Response({
+            "year": year,
+            "month": month,
+            "total_event": events.count(),
+            "event_statistics": data
+        })
+
+    @action(detail=False, methods=['get'], url_path='yearly')
+    def report_by_year(self, request):
+        try:
+            year = int(request.query_params.get('year'))
+        except (TypeError, ValueError):
+            return Response({"error": "Vui lòng cung cấp đúng định dạng ?year=YYYY"}, status=400)
+
+        user = request.user
+        events = self.get_filtered_events(user).filter(start_time__year=year)
+
+        data = []
+
+        for event in events:
+            ticket_count = Ticket.objects.filter(
+                ticket_class__event=event,
+                booked_at__year=year
+            ).count()
+
+            revenue_sum = Ticket.objects.filter(
+                ticket_class__event=event,
+                booked_at__year=year
+            ).aggregate(total=Sum('price_paid'))['total'] or 0
+
+            comment_count = Comment.objects.filter(
+                event=event,
+                created_at__year=year
+            ).count()
+
+            data.append({
+                'event_id': event.id,
+                'event_name': event.name,
+                'total_tickets': ticket_count,
+                'total_revenue': revenue_sum,
+                'total_comments': comment_count
+            })
+
+        return Response({
+            "year": year,
+            "total_event": events.count(),
+            "event_statistics": data
+        })

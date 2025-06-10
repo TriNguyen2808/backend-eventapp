@@ -6,8 +6,8 @@ from django.utils.html import mark_safe
 from django import forms
 from ckeditor_uploader.widgets import CKEditorUploadingWidget
 from .models import (
-    Role, Event,TicketClass, Ticket, Payment, Notification, Rating,
-    Report, ChatMessage, EventSuggestion, DiscountCode, Comment, Like, EventType, UserPreference
+    Role, Event,TicketClass, Ticket, PaymentLog, Notification, Rating,
+    Report, ChatMessage, EventSuggestion,DiscountType, DiscountCode, Comment, Like, EventType, UserPreference
 )
 
 User = get_user_model()
@@ -121,11 +121,30 @@ class EventSuggestionAdmin(admin.ModelAdmin):
     list_filter = ['preferred_type']
 
 
-# class DiscountCodeAdmin(admin.ModelAdmin):
-#     list_display = ['id', 'code', 'discount_percent', 'valid_from', 'valid_to', 'usage_limit']
-#     list_editable = ['usage_limit']
-#     search_fields = ['code']
+class DiscountTypeAdmin(admin.ModelAdmin):
+    list_display = ['id','name','description']
+    list_filter = ['name']
 
+
+class DiscountCodeAdmin(admin.ModelAdmin):
+    list_display = ['id','code','description','valid_from','valid_to','display_groups','max_usage','discount_type','discount_value','limit_discount','max_discount_amount','min_total_price','display_events','display_used_by']
+    readonly_fields = ['used_by']
+    list_filter = ['code','groups','events']
+
+    def display_groups(self, obj):
+        return ", ".join([group.name for group in obj.groups.all()])
+
+    display_groups.short_description = "Groups"
+
+    def display_events(self, obj):
+        return ", ".join([event.title for event in obj.events.all()])
+
+    display_events.short_description = "Events"
+
+    def display_used_by(self, obj):
+        return ", ".join([user.username for user in obj.used_by.all()])
+
+    display_used_by.short_description = "Used By"
 class CommentAdmin(admin.ModelAdmin):
     list_display = ('id', 'event', 'user', 'content', 'created_at')
     search_fields = ('user__username', 'event__name', 'content')
@@ -171,3 +190,7 @@ admin.site.register(Comment, CommentAdmin)
 admin.site.register(Like, LikeAdmin)
 admin.site.register(EventType, EventTypeAdmin)
 admin.site.register(UserPreference, UserPreferenceAdmin)
+admin.site.register(DiscountType, DiscountTypeAdmin)
+admin.site.register(DiscountCode, DiscountCodeAdmin)
+
+

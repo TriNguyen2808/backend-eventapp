@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'allauth.socialaccount',
     'allauth.socialaccount.providers.google',
     'django_filters',
+    'corsheaders',
 ]
 
 SITE_ID = 1
@@ -64,6 +65,8 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'allauth.account.middleware.AccountMiddleware',
+    'corsheaders.middleware.CorsMiddleware',  # thêm dòng này đầu tiên
+    'django.middleware.common.CommonMiddleware',
 ]
 import pymysql
 
@@ -168,6 +171,7 @@ cloudinary.config(
     secure=True
 )
 
+DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
 # Upload an image
 upload_result = cloudinary.uploader.upload("https://res.cloudinary.com/demo/image/upload/getting-started/shoes.jpg",
                                            public_id="shoes")
@@ -200,6 +204,19 @@ MOMO_PARTNER_CODE = "..."
 MOMO_ACCESS_KEY = "..."
 MOMO_SECRET_KEY = "..."
 
+
+# VNPAY CONFIG
+VNPAY_RETURN_URL = 'http://127.0.0.1:8000/payments/vnpay-return/'  # get from config
+VNPAY_PAYMENT_URL = 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html'  # get from config
+VNPAY_API_URL = 'https://sandbox.vnpayment.vn/merchant_webapi/api/transaction'
+VNPAY_TMN_CODE = '6RXRHCLV'  # Website ID in VNPAY System, get from config
+VNPAY_HASH_SECRET_KEY = 'NEDQF6PDAGBT425TIGMTDQC211VPE6C1'  # Secret key for create checksum,get from config
+
+# VNPAY_TMN_CODE = '6RXRHCLV'
+# VNPAY_HASH_SECRET = 'NEDQF6PDAGBT425TIGMTDQC211VPE6C1'
+# VNPAY_RETURN_URL = 'http://127.0.0.1:8000/payments/vnpay-return/'
+
+
 USE_TZ = False
 TIME_ZONE = 'Asia/Ho_Chi_Minh'
 
@@ -209,3 +226,6 @@ AUTHENTICATION_BACKENDS = [
 ]
 
 LOGIN_REDIRECT_URL = '/'
+
+CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_CREDENTIALS = True

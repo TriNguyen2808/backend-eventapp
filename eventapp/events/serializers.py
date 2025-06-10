@@ -1,14 +1,16 @@
 from django.template.context_processors import request
 from django.conf import settings
 from .models import (
-    User, Event,TicketClass, Ticket, Payment, Notification, Rating,
-    Report, ChatMessage, EventSuggestion, DiscountCode, Like, Comment
+    User, Event,TicketClass, Ticket, PaymentLog, Notification, Rating,
+    Report, ChatMessage, EventSuggestion, DiscountType, DiscountCode, Like, Comment
 )
 from django.utils.timezone import now
 from datetime import datetime
 from rest_framework import serializers
 from urllib.parse import quote
 import unicodedata, random, string, qrcode, os
+
+
 class EventSerializer(serializers.ModelSerializer):
 
     class Meta:
@@ -16,13 +18,10 @@ class EventSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'image', 'user', 'event_type', 'location', 'description', 'start_time', 'end_time','active', 'popularity_score']
         read_only_fields = ['id','user', 'active', 'popularity_score']
 
-    def get_image(self, event):
-
-        if event.image:
-            request = self.context.get('request')
-            if request:
-                return request.build_absolute_uri('/static/%s' % event.image.name)
-            return '/static/%s' % event.image.name
+    def get_image_url(self, obj):
+        if obj.image:
+            return obj.image.url
+        return None
 
     def create(self, validated_data):
         user = self.context['request'].user
@@ -73,6 +72,11 @@ class UserSerializer(serializers.ModelSerializer):
                 'write_only': True
             }
         }
+
+    def get_avatar_url(self, obj):
+        if obj.avatar:
+            return obj.avatar.url
+        return None
 
     #Đăng ký
     def create(self, validated_data):
@@ -185,3 +189,21 @@ class QRCheckInSerializer(serializers.ModelSerializer):
     #     if ticket.checked_in:
     #         raise serializers.ValidationError("Vé đã được check-in trước đó.")
     #     return ticket_code
+
+class DiscountTypeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DiscountType
+        fields = '__all__'
+
+class DiscountCodeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DiscountCode
+        fields = '__all__'
+
+    def validate(self, data):
+        if data['discount_type'].id == 2:
+            if data.get('discount_value', 0) > 100:
+                raise serializers.ValidationError("Phần trăm giảm giá không được vượt quá 100%.")
+            if data.get('limit_discount') and not data.get('max_discount_amount'):
+                raise serializers.ValidationError("Phải nhập mức giảm tối đa khi giới hạn giảm giá.")
+        return data

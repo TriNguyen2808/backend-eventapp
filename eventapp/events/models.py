@@ -5,7 +5,8 @@ from ckeditor.fields import RichTextField
 import random, string
 from unidecode import unidecode
 from cloudinary.models import CloudinaryField
-
+from django.db.models import Sum
+from django.utils import timezone
 
 class Role(models.Model):  # phan quyen
     class RoleName(models.TextChoices):  # enum ten quyen
@@ -29,7 +30,7 @@ class CustomerGroup(models.Model):
 
 class User(AbstractUser):  # nguoi dung
     email = models.EmailField(unique=True)  # email la duy nhat
-    avatar = CloudinaryField('avatar', null=True)
+    avatar = CloudinaryField('avatar', null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)  # thoi gian tao
     updated_at = models.DateTimeField(auto_now=True)  # thoi gian cap nhat
     role = models.ForeignKey(Role, on_delete=models.CASCADE, default=3)
@@ -39,7 +40,24 @@ class User(AbstractUser):  # nguoi dung
         return self.username
 
     def update_group(self):
-        pass
+        total_spending = Ticket.objects.filter(user=self).aggregate(total=Sum('price_paid'))['total'] or 0
+
+        # Sắp xếp nhóm theo spending_goal tăng dần
+        groups = CustomerGroup.objects.order_by('spending_goal')
+
+        matched_group = None
+        for i, group in enumerate(groups):
+            current_goal = group.spending_goal
+            next_goal = groups[i + 1].spending_goal if i + 1 < len(groups) else float('inf')
+
+            if current_goal <= total_spending < next_goal:
+                matched_group = group
+                break
+
+        # Cập nhật nếu khác
+        if matched_group and self.group != matched_group:
+            self.group = matched_group
+            self.save(update_fields=["group"])
 
     class Meta:
         ordering = ['-created_at']
@@ -62,7 +80,7 @@ class EventType(models.Model):
 class Event(models.Model):  # thong tin su kien
     user = models.ForeignKey(User, on_delete=models.CASCADE)  # nguoi to chuc
     name = models.CharField(max_length=255)  # ten
-    image = models.ImageField(upload_to='events/%Y/%m', null=True)
+    image = CloudinaryField('image', null=True, blank=True)
     description = RichTextField(blank=True, null=True)  # mo ta
     event_type = models.ForeignKey(EventType, to_field='name', on_delete=models.SET_NULL, null=True, blank=True)
     location = models.CharField(max_length=255, blank=True, null=True)  # dia diem to chuc
@@ -133,26 +151,6 @@ class Ticket(models.Model):
     checkin_time = models.DateTimeField(null=True, blank=True)
     booked_at = models.DateTimeField(auto_now_add=True)
 
-    # def save(self, *args, **kwargs):
-    #     if not self.price_paid and self.ticket_class:
-    #         self.price_paid = self.ticket_class.price
-    #
-    #         # Tự động tạo mã vé khi có ticket_class và user
-    #         if self.ticket_class and self.user:
-    #             if not self.ticket_code:  # Nếu ticket_code chưa được tạo
-    #                 event_name = self.ticket_class.event.name  # Lấy tên sự kiện từ TicketClass
-    #                 event_name_no_accents = unidecode(event_name)  # Loại bỏ dấu tiếng Việt
-    #                 prefix = ''.join([word[0].upper() for word in
-    #                                   event_name_no_accents.split()])  # Lấy chữ cái đầu các từ trong tên sự kiện
-    #                 while True:
-    #                     suffix = ''.join(random.choices(string.digits, k=6))  # Tạo 6 số ngẫu nhiên
-    #                     code = f"{prefix}{suffix}"
-    #                     if not Ticket.objects.filter(ticket_code=code).exists():  # Kiểm tra mã vé có bị trùng không
-    #                         self.ticket_code = code
-    #                         break
-    #
-    #     super().save(*args, **kwargs)
-
     def __str__(self):
         return f"{self.ticket_class.name} - {self.ticket_code}"
 
@@ -160,24 +158,6 @@ class Ticket(models.Model):
         ordering = ['ticket_class', 'booked_at']
 
 
-class Payment(models.Model):  # thanh toan
-    class PaymentMethod(models.TextChoices):  # enum phuong thuc thanh toan
-        MOMO = 'MOMO'
-        VNPAY = 'VNPAY'
-        CREDIT_CARD = 'CREDIT_CARD'
-
-    class PaymentStatus(models.TextChoices):  # enum trang thai thanh toan
-        SUCCESS = 'SUCCESS'
-        FAILED = 'FAILED'
-        PENDING = 'PENDING'
-
-    transaction_id = models.CharField(max_length=100, null=True, blank=True)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True)
-    ticket_class = models.ForeignKey(TicketClass, on_delete=models.CASCADE, null=True)
-    method = models.CharField(max_length=20, choices=PaymentMethod.choices)  # phuong thuc thanh toan
-    amount = models.DecimalField(max_digits=10, decimal_places=2)  # so tien thanh toan
-    status = models.CharField(max_length=10, choices=PaymentStatus.choices, default='PENDING')  # trang thai
-    payment_time = models.DateTimeField(auto_now_add=True)  # thoi gian thanh toan
 
 
 class Notification(models.Model):  # thong bao
@@ -249,8 +229,8 @@ class DiscountType(models.Model):
 class DiscountCode(models.Model):
     code = models.CharField(max_length=50, unique=True)
     description = models.TextField(blank=True)
-    valid_from = models.DateField(null=True, blank=True)  # ngay bat dau hieu luc
-    valid_to = models.DateField(null=True, blank=True)  # ngay het hieu luc
+    valid_from = models.DateTimeField(null=True, blank=True)  # ngay bat dau hieu luc
+    valid_to = models.DateTimeField(null=True, blank=True)  # ngay het hieu luc
     groups = models.ManyToManyField(CustomerGroup, related_name='discount_codes')
     max_usage = models.PositiveIntegerField(default=1)
     discount_type = models.ForeignKey(DiscountType, on_delete=models.CASCADE, related_name='discount_types', null=True)
@@ -263,3 +243,28 @@ class DiscountCode(models.Model):
 
     def __str__(self):
         return self.code
+
+
+class PaymentLog(models.Model):
+    STATUS_CHOICES = [
+        ('pending', 'Chờ thanh toán'),
+        ('success', 'Đã thanh toán'),
+        ('failed', 'Thất bại'),
+        ('expired', 'Hết hạn'),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    ticket_class = models.ForeignKey(TicketClass, on_delete=models.CASCADE)
+    discount_code = models.ForeignKey(DiscountCode, null=True, blank=True, on_delete=models.SET_NULL)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    transaction_id = models.CharField(max_length=100, blank=True, null=True)  # Mã giao dịch từ VNPay
+    ticket = models.OneToOneField('Ticket', null=True, blank=True, on_delete=models.SET_NULL)  # nếu tạo ticket sau thanh toán
+
+    def is_expired(self, timeout_minutes=15):
+        return self.status == 'pending' and (timezone.now() - self.created_at).total_seconds() > timeout_minutes * 60
+
+    def __str__(self):
+        return f"Payment #{self.pk} - {self.user} - {self.amount} VND - {self.status}"
