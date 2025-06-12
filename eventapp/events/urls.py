@@ -16,7 +16,8 @@ routers.register('discountcodes', views.DiscountCodeViewSet, basename='discountc
 routers.register('discounttypes', views.DiscountTypeViewSet, basename='discounttypes')
 routers.register('reports', views.ReportViewSet, basename='reports')
 routers.register('payments', views.VNPayViewSet, basename='vnpay')
-
+routers.register('auth/google', views.GoogleLoginViewSet, basename='google-login')
+routers.register(('payment_log'), views.PaymentLogViewSet, basename='payment_log')
 
 urlpatterns = [
     path('',include(routers.urls)),
@@ -24,7 +25,6 @@ urlpatterns = [
     path('events/<int:id>/ticketclass/', views.TicketClassViewSet.as_view({'post': 'create'})),
     path('accounts/', include('allauth.urls')),
     path('login/', views.CustomTokenView.as_view(), name='token'),
-    path('logout/', RevokeTokenView.as_view(), name='revoke-token'),
     path('pay', views.index, name='index'),
     path('payment', views.payment, name='payment'),
     path('payment_ipn', views.payment_ipn, name='payment_ipn'),

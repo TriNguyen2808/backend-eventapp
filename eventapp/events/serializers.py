@@ -2,7 +2,7 @@ from django.template.context_processors import request
 from django.conf import settings
 from .models import (
     User, Event,TicketClass, Ticket, PaymentLog, Notification, Rating,
-    Report, ChatMessage, EventSuggestion, DiscountType, DiscountCode, Like, Comment
+    Report, EventSuggestion, DiscountType, DiscountCode, Like, Comment
 )
 from django.utils.timezone import now
 from datetime import datetime
@@ -114,9 +114,15 @@ class CommentSerializer(serializers.ModelSerializer):
 
 
 class TicketSerializer(serializers.ModelSerializer):
+    event_name = serializers.SerializerMethodField()
+
     class Meta:
         model = Ticket
-        fields = ['ticket_class']
+        fields = ['ticket_code','ticket_class', 'user', 'price_paid', 'is_checked_in', 'booked_at', 'event_name']
+        read_only_fields = ['ticket_code', 'user', 'price_paid', 'is_checked_in', 'booked_at', 'event_name']
+
+    def get_event_name(self, obj):
+        return obj.ticket_class.event.name if obj.ticket_class and obj.ticket_class.event else None
 
     def validate(self, attrs):
         ticket_class = attrs['ticket_class']

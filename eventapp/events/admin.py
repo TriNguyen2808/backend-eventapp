@@ -7,7 +7,7 @@ from django import forms
 from ckeditor_uploader.widgets import CKEditorUploadingWidget
 from .models import (
     Role, Event,TicketClass, Ticket, PaymentLog, Notification, Rating,
-    Report, ChatMessage, EventSuggestion,DiscountType, DiscountCode, Comment, Like, EventType, UserPreference,
+    Report, EventSuggestion,DiscountType, DiscountCode, Comment, Like, EventType, UserPreference,
     PaymentVNPay
 )
 
@@ -57,6 +57,7 @@ class RoleAdmin(admin.ModelAdmin):
 class EventAdmin(admin.ModelAdmin):
     list_display = ['id', 'name', 'image', 'user', 'event_type', 'start_time', 'end_time','active']
     readonly_fields = ['created_at', 'updated_at','EventImage']
+
     def EventImage(self, event):
         if event:
             return mark_safe(
@@ -87,12 +88,6 @@ class TicketAdmin(admin.ModelAdmin):
     ]
 
 
-# class PaymentAdmin(admin.ModelAdmin):
-#     list_display = ['id', 'ticket', 'amount', 'payment_method', 'status', 'payment_time']
-#     readonly_fields = ['payment_time']
-#     search_fields = ['ticket__ticket_code']
-
-
 class NotificationAdmin(admin.ModelAdmin):
     list_display = ['id', 'user', 'type', 'is_read', 'created_at']
     search_fields = ['message']
@@ -109,13 +104,6 @@ class RatingAdmin(admin.ModelAdmin):
 class ReportAdmin(admin.ModelAdmin):
     list_display = ['id', 'event', 'total_tickets_sold', 'total_revenue', 'interest_score', 'generated_at']
     readonly_fields = ['generated_at']
-
-
-# class ChatMessageAdmin(admin.ModelAdmin):
-#     list_display = ['id', 'event', 'user']
-#     search_fields = ['message']
-#     autocomplete_fields = ['user', 'event']
-
 
 class EventSuggestionAdmin(admin.ModelAdmin):
     list_display = ['id', 'user', 'preferred_type', 'created_at']
@@ -138,7 +126,7 @@ class DiscountCodeAdmin(admin.ModelAdmin):
     display_groups.short_description = "Groups"
 
     def display_events(self, obj):
-        return ", ".join([event.title for event in obj.events.all()])
+        return ", ".join([event.name for event in obj.events.all()])
 
     display_events.short_description = "Events"
 
@@ -146,6 +134,7 @@ class DiscountCodeAdmin(admin.ModelAdmin):
         return ", ".join([user.username for user in obj.used_by.all()])
 
     display_used_by.short_description = "Used By"
+
 class CommentAdmin(admin.ModelAdmin):
     list_display = ('id', 'event', 'user', 'content', 'created_at')
     search_fields = ('user__username', 'event__name', 'content')
@@ -194,4 +183,5 @@ admin.site.register(UserPreference, UserPreferenceAdmin)
 admin.site.register(DiscountType, DiscountTypeAdmin)
 admin.site.register(DiscountCode, DiscountCodeAdmin)
 admin.site.register(PaymentVNPay)
+admin.site.register(PaymentLog)
 

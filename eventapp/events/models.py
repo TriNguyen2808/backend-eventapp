@@ -83,8 +83,8 @@ class Event(models.Model):  # thong tin su kien
     user = models.ForeignKey(User, on_delete=models.CASCADE)  # nguoi to chuc
     name = models.CharField(max_length=255)  # ten
     image = CloudinaryField('image', null=True, blank=True)
-    description = RichTextField(blank=True, null=True)  # mo ta
-    event_type = models.ForeignKey(EventType, to_field='name', on_delete=models.SET_NULL, null=True, blank=True)
+    description = models.TextField(null=True, blank=True)
+    event_type = models.ForeignKey(EventType, to_field='name', on_delete=models.CASCADE, blank=True)
     location = models.CharField(max_length=255, blank=True, null=True)  # dia diem to chuc
     start_time = models.DateTimeField()  # thoi gian bat dau
     end_time = models.DateTimeField()  # thoi gian ket thuc
@@ -94,7 +94,7 @@ class Event(models.Model):  # thong tin su kien
     popularity_score = models.FloatField(default=0)
 
     def __str__(self):
-        return self.name
+        return str(self.name) if self.name else "Unnamed Event"
 
     def update_popularity(self):
         ticket_count = Ticket.objects.filter(ticket_class__event=self).count()
@@ -186,7 +186,7 @@ class Notification(models.Model):  # thong bao
         GENERAL = 'GENERAL'
 
     user = models.ForeignKey(User, on_delete=models.CASCADE)  # nguoi nhan
-    message = RichTextField()  # noi dung thong bao
+    message = models.TextField(null=True, blank=True) # noi dung thong bao
     type = models.CharField(max_length=20, choices=NotificationType.choices)  # loai thong bao
     is_read = models.BooleanField(default=False)  # da doc hay chua
     created_at = models.DateTimeField(auto_now_add=True)  # thoi gian tao thong bao
@@ -214,17 +214,6 @@ class Report(models.Model):  # bao cao su kien
     total_revenue = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)  # doanh thu
     interest_score = models.IntegerField(default=0)  # chi so quan tam
     generated_at = models.DateTimeField(auto_now_add=True)  # thoi diem tao bao cao
-
-
-class ChatRoom(models.Model):
-    event = models.ForeignKey('events.Event', on_delete=models.CASCADE)
-    name = models.CharField(max_length=100)
-
-class ChatMessage(models.Model):
-    room = models.ForeignKey(ChatRoom, on_delete=models.CASCADE, related_name='messages', null=True)
-    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True)
-    message = models.TextField()
-    timestamp = models.DateTimeField(auto_now_add=True, null=True)
 
 
 class EventSuggestion(models.Model):  # goi y su kien theo so thich
