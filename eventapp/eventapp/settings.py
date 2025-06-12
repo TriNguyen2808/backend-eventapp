@@ -77,7 +77,7 @@ ROOT_URLCONF = 'eventapp.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [os.path.join(BASE_DIR, 'templates')],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -206,7 +206,7 @@ MOMO_SECRET_KEY = "..."
 
 
 # VNPAY CONFIG
-VNPAY_RETURN_URL = 'http://127.0.0.1:8000/payments/vnpay-return/'  # get from config
+VNPAY_RETURN_URL = 'http://127.0.0.1:8000/payment_return'  # get from config
 VNPAY_PAYMENT_URL = 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html'  # get from config
 VNPAY_API_URL = 'https://sandbox.vnpayment.vn/merchant_webapi/api/transaction'
 VNPAY_TMN_CODE = '6RXRHCLV'  # Website ID in VNPAY System, get from config
@@ -229,3 +229,4 @@ LOGIN_REDIRECT_URL = '/'
 
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
+ALLOWED_HOSTS=['*']

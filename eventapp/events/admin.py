@@ -7,7 +7,8 @@ from django import forms
 from ckeditor_uploader.widgets import CKEditorUploadingWidget
 from .models import (
     Role, Event,TicketClass, Ticket, PaymentLog, Notification, Rating,
-    Report, ChatMessage, EventSuggestion,DiscountType, DiscountCode, Comment, Like, EventType, UserPreference
+    Report, ChatMessage, EventSuggestion,DiscountType, DiscountCode, Comment, Like, EventType, UserPreference,
+    PaymentVNPay
 )
 
 User = get_user_model()
@@ -192,5 +193,5 @@ admin.site.register(EventType, EventTypeAdmin)
 admin.site.register(UserPreference, UserPreferenceAdmin)
 admin.site.register(DiscountType, DiscountTypeAdmin)
 admin.site.register(DiscountCode, DiscountCodeAdmin)
-
+admin.site.register(PaymentVNPay)
 

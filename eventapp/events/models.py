@@ -7,6 +7,8 @@ from unidecode import unidecode
 from cloudinary.models import CloudinaryField
 from django.db.models import Sum
 from django.utils import timezone
+from django import forms
+import unicodedata
 
 class Role(models.Model):  # phan quyen
     class RoleName(models.TextChoices):  # enum ten quyen
@@ -157,7 +159,24 @@ class Ticket(models.Model):
     class Meta:
         ordering = ['ticket_class', 'booked_at']
 
+    def generate_ticket_code(event):
+        # Tạo tên viết tắt từ tên sự kiện (không dấu, viết hoa chữ cái đầu)
+        initials = ''.join([
+            unicodedata.normalize('NFD', word)[0].upper()
+            for word in event.name.split() if word
+        ])
+        initials = ''.join(
+            c for c in unicodedata.normalize('NFD', initials)
+            if unicodedata.category(c) != 'Mn'
+        )
 
+        event_date_str = event.start_time.strftime('%d%m%Y')
+
+        while True:
+            suffix = ''.join(random.choices(string.digits, k=6))
+            ticket_code = f"{initials}-{event_date_str}-{suffix}"
+            if not Ticket.objects.filter(ticket_code=ticket_code).exists():
+                return ticket_code
 
 
 class Notification(models.Model):  # thong bao
@@ -268,3 +287,19 @@ class PaymentLog(models.Model):
 
     def __str__(self):
         return f"Payment #{self.pk} - {self.user} - {self.amount} VND - {self.status}"
+
+
+class PaymentVNPay(models.Model):
+    order_id = models.BigIntegerField(default=0, null=True, blank=True)
+    amount = models.FloatField(default=0, null=True, blank=True)
+    order_desc = models.CharField(max_length=200, null=True, blank=True)
+    vnp_TransactionNo = models.CharField(max_length=200, null=True, blank=True)
+    vnp_ResponseCode = models.CharField(max_length=200, null=True, blank=True)
+
+class PaymentForm(forms.Form):
+    order_id = forms.CharField(max_length=250)
+    order_type = forms.CharField(max_length=20)
+    amount = forms.IntegerField()
+    order_desc = forms.CharField(max_length=100)
+    bank_code = forms.CharField(max_length=20, required=False)
+    language = forms.CharField(max_length=2)

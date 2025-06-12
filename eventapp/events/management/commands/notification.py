@@ -2,7 +2,7 @@ from django.core.management.base import BaseCommand
 from django.utils.timezone import now, timedelta
 from django.core.mail import send_mail
 from django.conf import settings
-from events.models import (Event, TicketClass, Ticket, User)
+from .models import (Event, TicketClass, Ticket, User)
 
 class Command(BaseCommand):
     help = 'Gửi email nhắc nhở sự kiện còn 3 ngày nữa'

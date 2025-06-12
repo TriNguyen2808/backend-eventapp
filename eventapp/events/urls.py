@@ -22,12 +22,16 @@ urlpatterns = [
     path('',include(routers.urls)),
     #path("o/token/", views.CustomTokenView.as_view(), name="custom_token"),
     path('events/<int:id>/ticketclass/', views.TicketClassViewSet.as_view({'post': 'create'})),
-    #path('events/search/', views.EventSearchView.as_view({'get': 'list'})),
     path('accounts/', include('allauth.urls')),
     path('login/', views.CustomTokenView.as_view(), name='token'),
     path('logout/', RevokeTokenView.as_view(), name='revoke-token'),
-    # path('momo/init/', views.MomoPaymentInitView.as_view()),
-    # path('momo/callback/', views.MomoCallbackView.as_view()),
+    path('pay', views.index, name='index'),
+    path('payment', views.payment, name='payment'),
+    path('payment_ipn', views.payment_ipn, name='payment_ipn'),
+    path('payment_return', views.VNPayViewSet.as_view({'get': 'vnpay_return'}), name='payment_return'),
+    path('query', views.query, name='query'),
+    path('refund', views.refund, name='refund'),
+    #path('^admin/', admin.site.urls),
 ]
 
 #http://localhost:8000/accounts/login/

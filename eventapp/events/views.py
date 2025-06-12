@@ -16,7 +16,7 @@ from django.shortcuts import get_object_or_404
 import hmac, hashlib
 from oauth2_provider.models import AccessToken
 from django.utils import timezone
-import qrcode
+import qrcode, os
 from io import BytesIO
 import uuid, json
 from django.db.models import Value, CharField, Sum
@@ -25,14 +25,34 @@ from .momo import create_momo_payment
 from django.db import transaction
 from decimal import Decimal
 from django.db.models.functions import TruncMonth, TruncYear
+
+
+import hashlib
+import hmac
+import json
+import urllib
+import urllib.parse
+import urllib.request
+import random
+import requests
+from datetime import datetime
+from django.conf import settings
+from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.shortcuts import render, redirect
+from urllib.parse import quote as urlquote
+
+from .models import PaymentForm
+from .vnpay import vnpay
+
+
 from .models import (
     CustomerGroup, User, Event, TicketClass, Ticket, PaymentLog, Notification, Rating,
-    Report, ChatMessage, EventSuggestion, DiscountType, DiscountCode, Like, Comment, UserPreference, EventType
+    Report, ChatMessage, EventSuggestion, DiscountType, DiscountCode, Like, Comment, UserPreference, EventType, PaymentVNPay
 )
 
 
 # Event.
-class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIView, generics.DestroyAPIView):
+class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIView, generics.DestroyAPIView, generics.UpdateAPIView):
     serializer_class = serializers.EventDetailSerializer
     pagination_class = paginators.EventPaginator
     permission_classes = [permissions.IsAuthenticated()]
@@ -49,7 +69,7 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
             return [permissions.IsAuthenticated(), perms.IsAttendee()]
         elif self.action in ['create']:
             return [permissions.IsAuthenticated(), perms.IsOrganizer()]
-        elif self.action in ['destroy']:
+        elif self.action in ['destroy', 'update']:
             return [perms.OwnerIsAuthenticated()]
         return [permissions.IsAuthenticated()]
 
@@ -92,6 +112,57 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIVie
             }
         }
         return Response(response_data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        try:
+            instance = self.get_object()
+        except Event.DoesNotExist:
+            return Response({
+                "statusCode": 404,
+                "message": "Không tìm thấy sự kiện để cập nhật"
+            }, status=status.HTTP_404_NOT_FOUND)
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+
+        if serializer.is_valid():
+            serializer.save()
+
+            # 🔔 Lấy người đã mua vé
+            users = User.objects.filter(ticket__ticket_class__event=instance).distinct()
+
+            for user in users:
+                # Gửi thông báo hệ thống
+                # Notification.objects.create(
+                #     user=user,
+                #     message=f"Sự kiện '{instance.name}' bạn đã mua vé vừa được cập nhật.",
+                # )
+
+                # Gửi email
+                send_mail(
+                    subject=f"[Thông báo] Sự kiện '{instance.name}' đã được cập nhật",
+                    message=(
+                        f"Chào {user.get_full_name() or user.username},\n\n"
+                        f"Sự kiện bạn đã đặt vé ('{instance.name}') đã có cập nhật mới.\n"
+                        f"Thời gian: {instance.start_time.strftime('%d/%m/%Y %H:%M')} - {instance.end_time.strftime('%d/%m/%Y %H:%M')}\n"
+                        f"Địa điểm: {instance.location}\n\n"
+                        f"Vui lòng truy cập hệ thống để xem chi tiết.\n\n"
+                        f"Trân trọng,\nĐội ngũ tổ chức sự kiện"
+                    ),
+                    from_email=None,  # Lấy từ DEFAULT_FROM_EMAIL
+                    recipient_list=[user.email],
+                    fail_silently=False
+                )
+
+            return Response({
+                "statusCode": 200,
+                "message": "Cập nhật sự kiện thành công và đã gửi thông báo + email cho người tham gia.",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+
+        return Response({
+            "message": "Cập nhật sự kiện thất bại",
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
 
     def destroy(self, request, pk=None):
         try:
@@ -650,7 +721,7 @@ class EventReminderViewSet(viewsets.GenericViewSet):
 
 
 # Dat ve
-class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView):
+class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.DestroyAPIView):
     serializer_class = serializers.TicketSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -658,6 +729,24 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView):
         if self.action == 'check_in':
             return serializers.QRCheckInSerializer
         return serializers.TicketSerializer
+
+    def destroy(self, request, *args, **kwargs):
+        ticket_id = kwargs.get("pk")
+        ticket = get_object_or_404(Ticket, pk=ticket_id)
+
+        # Tăng lại số lượng vé có thể bán
+        ticket_class = ticket.ticket_class
+        if ticket_class.event.active:
+            ticket_class.total_available += 1
+        ticket_class.save()
+
+        ticket.delete()
+
+        return Response({
+            "statusCode": 200,
+            "message": "Xóa vé thành công",
+            "data": None
+        }, status=status.HTTP_200_OK)
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
@@ -670,6 +759,7 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView):
         event = ticket_class.event
         discount_code_str = request.data.get('discount_code')
         price_paid = ticket_class.price  # default
+        discount = None
 
         # Áp dụng mã giảm giá nếu có
         if discount_code_str:
@@ -712,28 +802,38 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView):
                     percentage_discount = min(percentage_discount, discount.max_discount_amount)
                 price_paid = max(price_paid - percentage_discount, 0)
 
-        # Tạo bản ghi tạm PaymentLog để lưu đơn chưa thanh toán
+        # Lưu đơn tạm chờ thanh toán
         payment_log = PaymentLog.objects.create(
             user=user,
             ticket_class=ticket_class,
             amount=price_paid,
-            discount_code=discount if discount_code_str else None,
+            discount_code=discount,
             status='pending',
         )
-        amount_vnpay = int(price_paid * 100)
-        # Tạo link thanh toán
-        vnp_url = vnpay.build_vnpay_url(
-            order_id=payment_log.id,
-            amount=amount_vnpay,  # Truyền amount đã nhân 100
-            return_url=settings.VNPAY_RETURN_URL,
-            ip_address=request.META.get('REMOTE_ADDR', '127.0.0.1'),  # Thêm fallback cho IP
-            order_desc= "Thanh toan ve su kien"  # Không dấu để tránh lỗi encoding
-        )
+
+        # Tạo URL thanh toán VNPay
+        vnp = vnpay()
+        vnp.requestData['vnp_Version'] = '2.1.0'
+        vnp.requestData['vnp_Command'] = 'pay'
+        vnp.requestData['vnp_TmnCode'] = settings.VNPAY_TMN_CODE
+        vnp.requestData['vnp_Amount'] = int(price_paid * 100)
+        vnp.requestData['vnp_CurrCode'] = 'VND'
+        vnp.requestData['vnp_TxnRef'] = str(payment_log.id)
+        vnp.requestData['vnp_OrderInfo'] = "Thanh toan ve su kien"
+        vnp.requestData['vnp_OrderType'] = 'event_ticket'
+        vnp.requestData['vnp_Locale'] = 'vn'
+        vnp.requestData['vnp_CreateDate'] = datetime.now().strftime('%Y%m%d%H%M%S')
+        vnp.requestData['vnp_IpAddr'] = get_client_ip(request)
+        vnp.requestData['vnp_ReturnUrl'] = settings.VNPAY_RETURN_URL
+
+        # (Tùy chọn) vnp.requestData['vnp_BankCode'] = 'VNPAYQR'
+
+        vnpay_payment_url = vnp.get_payment_url(settings.VNPAY_PAYMENT_URL, settings.VNPAY_HASH_SECRET_KEY)
 
         return Response({
             "statusCode": 200,
             "message": "Vui lòng thanh toán qua VNPay.",
-            "payment_url": vnp_url
+            "payment_url": vnpay_payment_url
         })
 
 
@@ -777,166 +877,134 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView):
 
 
 class VNPayViewSet(viewsets.ViewSet):
+
+    @transaction.atomic
     @action(detail=False, methods=['get'], url_path='vnpay-return')
     def vnpay_return(self, request):
-        params = request.query_params
-        order_id = params.get('vnp_TxnRef')
-        secure_hash = params.get('vnp_SecureHash')
+        inputData = request.GET
+        if not inputData:
+            return render(request, "payment/payment_return.html", {"title": "Kết quả thanh toán", "result": ""})
 
-        # 1. Kiểm tra hash hợp lệ
-        params_dict = dict(params)
-        params_dict.pop('vnp_SecureHash', None)
-        params_dict = {k: v for k, v in params_dict.items()}
+        # Khởi tạo dữ liệu từ VNPay
+        vnp = vnpay()
+        vnp.responseData = inputData.dict()
+        order_id = inputData.get('vnp_TxnRef')
+        amount = int(inputData.get('vnp_Amount', 0)) / 100
+        order_desc = inputData.get('vnp_OrderInfo', '')
+        vnp_TransactionNo = inputData.get('vnp_TransactionNo', '')
+        vnp_ResponseCode = inputData.get('vnp_ResponseCode', '')
+        vnp_TmnCode = inputData.get('vnp_TmnCode', '')
+        vnp_PayDate = inputData.get('vnp_PayDate', '')
+        vnp_BankCode = inputData.get('vnp_BankCode', '')
+        vnp_CardType = inputData.get('vnp_CardType', '')
 
-        hash_string = '&'.join(f"{k}={v}" for k, v in sorted(params_dict.items()))
-        expected_hash = hmac.new(
-            settings.VNPAY_HASH_SECRET_KEY.encode(),
-            hash_string.encode(),
-            hashlib.sha512
-        ).hexdigest()
-
-        if expected_hash != secure_hash:
-            print(expected_hash)
-            print('\n')
-            print(secure_hash)
-            print('\n')
-            print(order_id)
-            return Response({"error": "Xác thực VNPay thất bại"}, status=status.HTTP_400_BAD_REQUEST)
-
-        # 2. Kiểm tra trạng thái giao dịch
-        if params.get('vnp_ResponseCode') != '00':
-            return Response({"error": "Giao dịch không thành công"}, status=status.HTTP_400_BAD_REQUEST)
-
-        # 3. Tìm đơn và tạo vé
-        with transaction.atomic():
-            payment_log = get_object_or_404(PaymentLog, id=order_id, status='pending')
-
-            # Đánh dấu thanh toán thành công
-            payment_log.status = 'success'
-            payment_log.transaction_id = params.get('vnp_TransactionNo')  # hoặc vnp_TransactionStatus
-            payment_log.save()
-
-            # Tạo vé tương ứng
-            ticket = Ticket.objects.create(
-                user=payment_log.user,
-                ticket_class=payment_log.ticket_class,
-                price_paid=payment_log.amount
-            )
-            payment_log.ticket = ticket
-            payment_log.save(update_fields=['ticket'])
-
-            user = request.user
-            event = ticket.ticket_class.event
-
-            # Đánh dấu đã dùng mã
-            if payment_log.discount_code:
-                payment_log.discount_code.used_by.add(payment_log.user)
-
-            # Cập nhật độ phổ biến
-            ticket.ticket_class.event.update_popularity()
-
-            # Cập nhật nhóm của người dùng
-            payment_log.user.update_group()
-
-            # Gửi email (có thể giữ nguyên đoạn email của bạn trước đó)
-            qr_file_path = serializers.TicketSerializer.create_qr_image(ticket.ticket_code)
-            email = EmailMessage(
-                subject=f"[Đặt vé thành công] {event.name}",
-                body=(
-                    f"Xin chào {user.get_full_name() or user.username},\n\n"
-                    f"Bạn đã đặt vé thành công cho sự kiện: {event.name}.\n"
-                    f"Thời gian: {event.start_time.strftime('%H:%M %d/%m/%Y')}\n"
-                    f"Mã vé của bạn: {ticket.ticket_code}\n\n"
-                    "Hãy đem mã QR đính kèm để check-in tại sự kiện.\n\n"
-                    "Cảm ơn bạn đã sử dụng hệ thống!"
-                ),
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                to=[user.email],
-            )
-            with open(qr_file_path, 'rb') as qr_file:
-                email.attach(f'{ticket.ticket_code}.png', qr_file.read(), 'image/png')
-            email.send()
-
-            return Response({
-                "statusCode": 200,
-                "error": None,
-                "message": "Đặt vé thành công. Mã QR đã được gửi qua email.",
-                "data": {
-                    "ticket_code": ticket.ticket_code,
-                    "ticketclass_price": ticket.ticket_class.price,
-                    "discount": ticket.ticket_class.price - ticket.price_paid,
-                    "price_paid": float(ticket.price_paid),
-                    "book_at": ticket.booked_at,
-                    "info user": {
-                        "name": ticket.user.get_full_name(),
-                        "email": ticket.user.email,
-                        "user's group": ticket.user.group.name
-                    }
-
-                }
-            }, status=status.HTTP_201_CREATED)
-
-
-class MomoPaymentInitView(viewsets.ViewSet):
-    permission_classes = [permissions.IsAuthenticated]
-
-    def post(self, request):
-        ticket_class_id = request.data.get("ticket_class")
-        method = request.data.get("method", "momo")
-
-        try:
-            ticket_class = TicketClass.objects.get(pk=ticket_class_id)
-        except TicketClass.DoesNotExist:
-            return Response({"error": "Không tìm thấy hạng vé"}, status=status.HTTP_400_BAD_REQUEST)
-
-        if ticket_class.total_available <= 0:
-            return Response({"error": "Hạng vé đã bán hết."}, status=status.HTTP_400_BAD_REQUEST)
-
-        amount = ticket_class.price
-        order_id = str(uuid.uuid4())
-
-        # Tạo log
-        log = PaymentLog.objects.create(
-            user=request.user,
-            ticket_class=ticket_class,
-            amount=amount,
-            method=method,
-            status='pending'
-        )
-
-        # Gọi API MoMo
-        momo_response = create_momo_payment(
-            amount=amount,
+        # Ghi log thanh toán (dù thành công hay thất bại)
+        PaymentVNPay.objects.create(
             order_id=order_id,
-            redirect_url="https://yourdomain.com/payment-success/",
-            ipn_url="https://yourdomain.com/api/payment/momo/ipn/"
+            amount=amount,
+            order_desc=order_desc,
+            vnp_TransactionNo=vnp_TransactionNo,
+            vnp_ResponseCode=vnp_ResponseCode,
         )
 
-        pay_url = momo_response.get("payUrl")
-        if not pay_url:
-            return Response({"error": "Không thể tạo thanh toán MoMo"}, status=500)
+        # Kiểm tra checksum
+        if not vnp.validate_response(settings.VNPAY_HASH_SECRET_KEY):
+            return render(request, "payment/payment_return.html", {
+                "title": "Kết quả thanh toán",
+                "result": "Lỗi",
+                "order_id": order_id,
+                "amount": amount,
+                "order_desc": order_desc,
+                "vnp_TransactionNo": vnp_TransactionNo,
+                "vnp_ResponseCode": vnp_ResponseCode,
+                "msg": "Sai checksum"
+            })
 
-        # Lưu transaction_id nếu có
-        log.transaction_id = order_id
-        log.save()
+        if vnp_ResponseCode != "00":
+            return render(request, "payment/payment_return.html", {
+                "title": "Kết quả thanh toán",
+                "result": "Lỗi",
+                "order_id": order_id,
+                "amount": amount,
+                "order_desc": order_desc,
+                "vnp_TransactionNo": vnp_TransactionNo,
+                "vnp_ResponseCode": vnp_ResponseCode
+            })
 
-        return Response({"payUrl": pay_url})
+        # Giao dịch hợp lệ → tạo vé, cập nhật trạng thái
+        try:
+            with transaction.atomic():
+                payment_log = get_object_or_404(PaymentLog, id=order_id, status='pending')
+                payment_log.status = 'success'
+                payment_log.transaction_id = vnp_TransactionNo
+                payment_log.save()
 
+                ticket = Ticket.objects.create(
+                    ticket_code=Ticket.generate_ticket_code(payment_log.ticket_class.event),
+                    user=payment_log.user,
+                    ticket_class=payment_log.ticket_class,
+                    price_paid=payment_log.amount
+                )
 
-class MomoCallbackView(viewsets.ViewSet):
-    permission_classes = [permissions.AllowAny]  # MoMo gọi không có token
+                payment_log.ticket = ticket
+                payment_log.save(update_fields=['ticket'])
 
-    def post(self, request):
-        data = request.data
-        order_id = data.get("orderId")
-        result_code = data.get("resultCode")
+                user = ticket.user
+                event = ticket.ticket_class.event
 
-        if result_code == 0:
-            # Thanh toán thành công → Tạo vé ở đây hoặc lưu trạng thái "đã thanh toán"
-            ...
-            return Response({"message": "Thanh toán thành công."}, status=status.HTTP_200_OK)
-        else:
-            return Response({"message": "Thanh toán thất bại."}, status=status.HTTP_400_BAD_REQUEST)
+                if payment_log.discount_code:
+                    payment_log.discount_code.used_by.add(user)
+
+                event.update_popularity()
+                user.update_group()
+
+                # Gửi email QR
+                qr_file_path = serializers.TicketSerializer.create_qr_image(ticket.ticket_code)
+                email = EmailMessage(
+                    subject=f"[Đặt vé thành công] {event.name}",
+                    body=(
+                        f"Xin chào {user.get_full_name() or user.username},\n\n"
+                        f"Bạn đã đặt vé thành công cho sự kiện: {event.name}.\n"
+                        f"Thời gian: {event.start_time.strftime('%H:%M %d/%m/%Y')}\n"
+                        f"Mã vé của bạn: {ticket.ticket_code}\n\n"
+                        "Hãy đem mã QR đính kèm để check-in tại sự kiện.\n\n"
+                        "Cảm ơn bạn đã sử dụng hệ thống!"
+                    ),
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    to=[user.email],
+                )
+                with open(qr_file_path, 'rb') as qr_file:
+                    email.attach(f'{ticket.ticket_code}.png', qr_file.read(), 'image/png')
+                email.send()
+
+        except Exception as e:
+            print("Lỗi khi xử lý vé:", e)
+            return render(request, "payment/payment_return.html", {
+                "title": "Kết quả thanh toán",
+                "result": "Lỗi khi xử lý đơn hàng",
+                "order_id": order_id,
+                "amount": amount,
+                "order_desc": order_desc,
+                "vnp_TransactionNo": vnp_TransactionNo,
+                "vnp_ResponseCode": vnp_ResponseCode
+            })
+
+        return render(request, "payment/payment_return.html", {
+            "title": "Kết quả thanh toán",
+            "result": "Thành công",
+            "order_id": order_id,
+            "amount": amount,
+            "order_desc": order_desc,
+            "vnp_TransactionNo": vnp_TransactionNo,
+            "vnp_ResponseCode": vnp_ResponseCode,
+
+            "user_full_name": user.get_full_name() or user.username,
+    "user_email": user.email,
+    "event_name": event.name,
+    "event_time": event.start_time.strftime('%H:%M %d/%m/%Y'),
+    "ticket_code": ticket.ticket_code,
+    "event_location": event.location
+        })
 
 
 class CustomTokenView(TokenView):
@@ -1182,3 +1250,270 @@ class ReportViewSet(viewsets.ViewSet):
             "total_event": events.count(),
             "event_statistics": data
         })
+
+
+#Thanh toan VNPay
+
+
+def index(request):
+    return render(request, "payment/index.html", {"title": "Danh sách demo"})
+
+
+def hmacsha512(key, data):
+    byteKey = key.encode('utf-8')
+    byteData = data.encode('utf-8')
+    return hmac.new(byteKey, byteData, hashlib.sha512).hexdigest()
+
+
+def payment(request):
+
+    if request.method == 'POST':
+        # Process input data and build url payment
+        form = PaymentForm(request.POST)
+        if form.is_valid():
+            order_type = form.cleaned_data['order_type']
+            order_id = form.cleaned_data['order_id']
+            amount = form.cleaned_data['amount']
+            order_desc = form.cleaned_data['order_desc']
+            bank_code = form.cleaned_data['bank_code']
+            language = form.cleaned_data['language']
+            ipaddr = get_client_ip(request)
+            # Build URL Payment
+            vnp = vnpay()
+            vnp.requestData['vnp_Version'] = '2.1.0'
+            vnp.requestData['vnp_Command'] = 'pay'
+            vnp.requestData['vnp_TmnCode'] = settings.VNPAY_TMN_CODE
+            vnp.requestData['vnp_Amount'] = amount * 100
+            vnp.requestData['vnp_CurrCode'] = 'VND'
+            vnp.requestData['vnp_TxnRef'] = order_id
+            vnp.requestData['vnp_OrderInfo'] = order_desc
+            vnp.requestData['vnp_OrderType'] = order_type
+            # Check language, default: vn
+            if language and language != '':
+                vnp.requestData['vnp_Locale'] = language
+            else:
+                vnp.requestData['vnp_Locale'] = 'vn'
+                # Check bank_code, if bank_code is empty, customer will be selected bank on VNPAY
+            if bank_code and bank_code != "":
+                vnp.requestData['vnp_BankCode'] = bank_code
+
+            vnp.requestData['vnp_CreateDate'] = datetime.now().strftime('%Y%m%d%H%M%S')  # 20150410063022
+            vnp.requestData['vnp_IpAddr'] = ipaddr
+            vnp.requestData['vnp_ReturnUrl'] = settings.VNPAY_RETURN_URL
+            vnpay_payment_url = vnp.get_payment_url(settings.VNPAY_PAYMENT_URL, settings.VNPAY_HASH_SECRET_KEY)
+            print(vnpay_payment_url)
+            return redirect(vnpay_payment_url)
+        else:
+            print("Form input not validate")
+    else:
+        return render(request, "payment/payment.html", {"title": "Thanh toán"})
+
+
+def payment_ipn(request):
+    inputData = request.GET
+    if inputData:
+        vnp = vnpay()
+        vnp.responseData = inputData.dict()
+        order_id = inputData['vnp_TxnRef']
+        amount = inputData['vnp_Amount']
+        order_desc = inputData['vnp_OrderInfo']
+        vnp_TransactionNo = inputData['vnp_TransactionNo']
+        vnp_ResponseCode = inputData['vnp_ResponseCode']
+        vnp_TmnCode = inputData['vnp_TmnCode']
+        vnp_PayDate = inputData['vnp_PayDate']
+        vnp_BankCode = inputData['vnp_BankCode']
+        vnp_CardType = inputData['vnp_CardType']
+        if vnp.validate_response(settings.VNPAY_HASH_SECRET_KEY):
+            # Check & Update Order Status in your Database
+            # Your code here
+            firstTimeUpdate = True
+            totalamount = True
+            if totalamount:
+                if firstTimeUpdate:
+                    if vnp_ResponseCode == '00':
+                        print('Payment Success. Your code implement here')
+                    else:
+                        print('Payment Error. Your code implement here')
+
+                    # Return VNPAY: Merchant update success
+                    result = JsonResponse({'RspCode': '00', 'Message': 'Confirm Success'})
+                else:
+                    # Already Update
+                    result = JsonResponse({'RspCode': '02', 'Message': 'Order Already Update'})
+            else:
+                # invalid amount
+                result = JsonResponse({'RspCode': '04', 'Message': 'invalid amount'})
+        else:
+            # Invalid Signature
+            result = JsonResponse({'RspCode': '97', 'Message': 'Invalid Signature'})
+    else:
+        result = JsonResponse({'RspCode': '99', 'Message': 'Invalid request'})
+
+    return result
+
+
+def payment_return(request):
+    inputData = request.GET
+    if inputData:
+        vnp = vnpay()
+        vnp.responseData = inputData.dict()
+        order_id = inputData['vnp_TxnRef']
+        amount = int(inputData['vnp_Amount']) / 100
+        order_desc = inputData['vnp_OrderInfo']
+        vnp_TransactionNo = inputData['vnp_TransactionNo']
+        vnp_ResponseCode = inputData['vnp_ResponseCode']
+        vnp_TmnCode = inputData['vnp_TmnCode']
+        vnp_PayDate = inputData['vnp_PayDate']
+        vnp_BankCode = inputData['vnp_BankCode']
+        vnp_CardType = inputData['vnp_CardType']
+
+        payment = PaymentVNPay.objects.create(
+            order_id = order_id,
+            amount = amount,
+            order_desc = order_desc ,
+            vnp_TransactionNo = vnp_TransactionNo,
+            vnp_ResponseCode = vnp_ResponseCode
+        )
+
+        if vnp.validate_response(settings.VNPAY_HASH_SECRET_KEY):
+            if vnp_ResponseCode == "00":
+                return render(request, "payment/payment_return.html", {"title": "Kết quả thanh toán",
+                                                               "result": "Thành công", "order_id": order_id,
+                                                               "amount": amount,
+                                                               "order_desc": order_desc,
+                                                               "vnp_TransactionNo": vnp_TransactionNo,
+                                                               "vnp_ResponseCode": vnp_ResponseCode})
+            else:
+                return render(request, "payment/payment_return.html", {"title": "Kết quả thanh toán",
+                                                               "result": "Lỗi", "order_id": order_id,
+                                                               "amount": amount,
+                                                               "order_desc": order_desc,
+                                                               "vnp_TransactionNo": vnp_TransactionNo,
+                                                               "vnp_ResponseCode": vnp_ResponseCode})
+        else:
+            return render(request, "payment/payment_return.html",
+                          {"title": "Kết quả thanh toán", "result": "Lỗi", "order_id": order_id, "amount": amount,
+                           "order_desc": order_desc, "vnp_TransactionNo": vnp_TransactionNo,
+                           "vnp_ResponseCode": vnp_ResponseCode, "msg": "Sai checksum"})
+    else:
+        return render(request, "payment/payment_return.html", {"title": "Kết quả thanh toán", "result": ""})
+
+
+def get_client_ip(request):
+    x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if x_forwarded_for:
+        ip = x_forwarded_for.split(',')[0]
+    else:
+        ip = request.META.get('REMOTE_ADDR')
+    return ip
+
+n = random.randint(10**11, 10**12 - 1)
+n_str = str(n)
+while len(n_str) < 12:
+    n_str = '0' + n_str
+
+
+def query(request):
+    if request.method == 'GET':
+        return render(request, "payment/query.html", {"title": "Kiểm tra kết quả giao dịch"})
+
+    url = settings.VNPAY_API_URL
+    secret_key = settings.VNPAY_HASH_SECRET_KEY
+    vnp_TmnCode = settings.VNPAY_TMN_CODE
+    vnp_Version = '2.1.0'
+
+    vnp_RequestId = n_str
+    vnp_Command = 'querydr'
+    vnp_TxnRef = request.POST['order_id']
+    vnp_OrderInfo = 'kiem tra gd'
+    vnp_TransactionDate = request.POST['trans_date']
+    vnp_CreateDate = datetime.now().strftime('%Y%m%d%H%M%S')
+    vnp_IpAddr = get_client_ip(request)
+
+    hash_data = "|".join([
+        vnp_RequestId, vnp_Version, vnp_Command, vnp_TmnCode,
+        vnp_TxnRef, vnp_TransactionDate, vnp_CreateDate,
+        vnp_IpAddr, vnp_OrderInfo
+    ])
+
+    secure_hash = hmac.new(secret_key.encode(), hash_data.encode(), hashlib.sha512).hexdigest()
+
+    data = {
+        "vnp_RequestId": vnp_RequestId,
+        "vnp_TmnCode": vnp_TmnCode,
+        "vnp_Command": vnp_Command,
+        "vnp_TxnRef": vnp_TxnRef,
+        "vnp_OrderInfo": vnp_OrderInfo,
+        "vnp_TransactionDate": vnp_TransactionDate,
+        "vnp_CreateDate": vnp_CreateDate,
+        "vnp_IpAddr": vnp_IpAddr,
+        "vnp_Version": vnp_Version,
+        "vnp_SecureHash": secure_hash
+    }
+
+    headers = {"Content-Type": "application/json"}
+
+    response = requests.post(url, headers=headers, data=json.dumps(data))
+
+    if response.status_code == 200:
+        response_json = json.loads(response.text)
+    else:
+        response_json = {"error": f"Request failed with status code: {response.status_code}"}
+
+    return render(request, "payment/query.html", {"title": "Kiểm tra kết quả giao dịch", "response_json": response_json})
+
+def refund(request):
+    if request.method == 'GET':
+        return render(request, "payment/refund.html", {"title": "Hoàn tiền giao dịch"})
+
+    url = settings.VNPAY_API_URL
+    secret_key = settings.VNPAY_HASH_SECRET_KEY
+    vnp_TmnCode = settings.VNPAY_TMN_CODE
+    vnp_RequestId = n_str
+    vnp_Version = '2.1.0'
+    vnp_Command = 'refund'
+    vnp_TransactionType = request.POST['TransactionType']
+    vnp_TxnRef = request.POST['order_id']
+    vnp_Amount = request.POST['amount']
+    vnp_OrderInfo = request.POST['order_desc']
+    vnp_TransactionNo = '0'
+    vnp_TransactionDate = request.POST['trans_date']
+    vnp_CreateDate = datetime.now().strftime('%Y%m%d%H%M%S')
+    vnp_CreateBy = 'user01'
+    vnp_IpAddr = get_client_ip(request)
+
+    hash_data = "|".join([
+        vnp_RequestId, vnp_Version, vnp_Command, vnp_TmnCode, vnp_TransactionType, vnp_TxnRef,
+        vnp_Amount, vnp_TransactionNo, vnp_TransactionDate, vnp_CreateBy, vnp_CreateDate,
+        vnp_IpAddr, vnp_OrderInfo
+    ])
+
+    secure_hash = hmac.new(secret_key.encode(), hash_data.encode(), hashlib.sha512).hexdigest()
+
+    data = {
+        "vnp_RequestId": vnp_RequestId,
+        "vnp_TmnCode": vnp_TmnCode,
+        "vnp_Command": vnp_Command,
+        "vnp_TxnRef": vnp_TxnRef,
+        "vnp_Amount": vnp_Amount,
+        "vnp_OrderInfo": vnp_OrderInfo,
+        "vnp_TransactionDate": vnp_TransactionDate,
+        "vnp_CreateDate": vnp_CreateDate,
+        "vnp_IpAddr": vnp_IpAddr,
+        "vnp_TransactionType": vnp_TransactionType,
+        "vnp_TransactionNo": vnp_TransactionNo,
+        "vnp_CreateBy": vnp_CreateBy,
+        "vnp_Version": vnp_Version,
+        "vnp_SecureHash": secure_hash
+    }
+
+    headers = {"Content-Type": "application/json"}
+
+    response = requests.post(url, headers=headers, data=json.dumps(data))
+
+    if response.status_code == 200:
+        response_json = json.loads(response.text)
+    else:
+        response_json = {"error": f"Request failed with status code: {response.status_code}"}
+
+    return render(request, "payment/refund.html", {"title": "Kết quả hoàn tiền giao dịch", "response_json": response_json})

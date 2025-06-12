@@ -1,0 +1,46 @@
+{% extends "payment/base_layout.html" %}
+{% block content %}
+<div class="container" style="margin-top: 20px;">
+    <h2 class="text-center">{{ title }}</h2>
+    <h4 class="text-center text-success">{{ result }}</h4>
+    <div class="row mt-4">
+        <!-- Thông tin thanh toán -->
+        <div class="col-md-6">
+            <div class="panel panel-primary">
+                <div class="panel-heading">Thông tin thanh toán</div>
+                <div class="panel-body">
+                    <p><strong>Mã đơn hàng:</strong> {{ order_id }}</p>
+                    <p><strong>Số tiền:</strong> {{ amount }} VNĐ</p>
+                    <p><strong>Nội dung:</strong> {{ order_desc }}</p>
+                    <p><strong>Mã giao dịch VNPay:</strong> {{ vnp_TransactionNo }}</p>
+                    {% if vnp_ResponseCode == '00' %}
+                        <p><strong>Trạng thái:</strong> {{ vnp_ResponseCode }} - Thành công</p>
+                    {% else %}
+                        <p><strong>Trạng thái:</strong> {{ vnp_ResponseCode }} - Lỗi</p>
+                    {% endif %}
+                    {% if msg %}
+                        <p class="alert alert-warning">{{ msg }}</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Thông tin người đặt vé -->
+        <div class="col-md-6">
+            <div class="panel panel-info">
+                <div class="panel-heading">Thông tin người đặt vé</div>
+                <div class="panel-body">
+                    <p><strong>Họ tên:</strong> {{ user_full_name }}</p>
+                    <p><strong>Email:</strong> {{ user_email }}</p>
+                    <p><strong>Sự kiện:</strong> {{ event_name }}</p>
+                    <p><strong>Thời gian:</strong> {{ event_time }}</p>
+                    <p><strong>Mã vé:</strong> {{ ticket_code }}</p>
+                    <p><strong>Địa điểm:</strong> {{ event_location }}</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+

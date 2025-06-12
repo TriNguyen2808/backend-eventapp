@@ -23,6 +23,21 @@ class EventSerializer(serializers.ModelSerializer):
             return obj.image.url
         return None
 
+    def update(self, instance, validated_data):
+        location = validated_data.get('location', instance.location)
+
+        # Nếu location được thay đổi -> cập nhật URL Google Maps
+        if location != instance.location:
+            location_url = f"https://www.google.com/maps/search/?api=1&query={quote(location)}"
+            instance.location = location_url
+
+        for attr, value in validated_data.items():
+            if attr != 'location':
+                setattr(instance, attr, value)
+
+        instance.save()
+        return instance
+
     def create(self, validated_data):
         user = self.context['request'].user
         location = validated_data.pop('location', '')
@@ -109,6 +124,7 @@ class TicketSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Hạng vé đã bán hết.")
         return attrs
 
+    @staticmethod
     def create_qr_image(ticket_code):
         now = datetime.now()
         # Tạo mã QR từ ticket_code
