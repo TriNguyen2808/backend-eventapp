@@ -1,8 +1,7 @@
 from django.template.context_processors import request
 from django.conf import settings
 from .models import (
-    User, Event,TicketClass, Ticket, PaymentLog, Notification, Rating,
-    Report, EventSuggestion, DiscountType, DiscountCode, Like, Comment
+    User, Event,TicketClass, Ticket, DiscountCode, Comment
 )
 from django.utils.timezone import now
 from datetime import datetime
@@ -15,18 +14,24 @@ class EventSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Event
-        fields = ['id', 'name', 'image', 'user', 'event_type', 'location', 'description', 'start_time', 'end_time','active', 'popularity_score']
-        read_only_fields = ['id','user', 'active', 'popularity_score']
+        fields = ['id', 'name', 'image', 'user', 'event_type', 'location', 'description', 'start_time', 'end_time',
+                  'active', 'popularity_score']
+        read_only_fields = ['id', 'user', 'active', 'popularity_score']
 
-    def get_image_url(self, obj):
+    def get_image(self, obj):
         if obj.image:
             return obj.image.url
         return None
 
+    def create(self, validated_data):
+        user = self.context['request'].user
+        location = validated_data.get('location', '')
+        location_url = f"https://www.google.com/maps/search/?api=1&query={quote(location)}"
+        validated_data['location'] = location_url
+        return Event.objects.create(user=user, **validated_data)
+
     def update(self, instance, validated_data):
         location = validated_data.get('location', instance.location)
-
-        # Nếu location được thay đổi -> cập nhật URL Google Maps
         if location != instance.location:
             location_url = f"https://www.google.com/maps/search/?api=1&query={quote(location)}"
             instance.location = location_url
@@ -38,79 +43,65 @@ class EventSerializer(serializers.ModelSerializer):
         instance.save()
         return instance
 
-    def create(self, validated_data):
-        user = self.context['request'].user
-        location = validated_data.pop('location', '')
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
 
-        # Tạo URL Google Maps
-        location_url = f"https://www.google.com/maps/search/?api=1&query={quote(location)}"
+        # Chuyển đổi tên field về camelCase nếu cần (đã xử lý phần lớn qua source=...)
+        # rep['eventType'] và các field khác đã đúng chuẩn
 
-        # Tạo sự kiện
-        event = Event.objects.create(
-            user=user,
-            location=location_url,
-            **validated_data
-        )
-        return event
+        return rep
 
 
 class TicketClassSerializer(serializers.ModelSerializer):
+    event_name = serializers.CharField(source='event.name', read_only=True)
+
     class Meta:
         model = TicketClass
-        fields = ['id','name','price','type','total_available']
-        read_only_fields = ['id']
+        fields = ['id','name','price','type','total_available', 'event_name']
+        read_only_fields = ['id', 'event_name']
 
     def create(self, validated_data):
         event = self.context.get('event')
         return TicketClass.objects.create(event=event, **validated_data)
 
-
-class EventDetailSerializer(EventSerializer):
-    liked = serializers.SerializerMethodField()
-
-    def get_liked(self,event):
-        request = self.context.get('request')
-        if request.user.is_authenticated:
-            return event.like_set.filter(active=True).exists()
-
-    class Meta:
-        model = EventSerializer.Meta.model
-        fields = EventSerializer.Meta.fields + ['liked']
-
 class UserSerializer(serializers.ModelSerializer):
+
     class Meta:
         model = User
-        fields = ['first_name','last_name','avatar','email','username','password','role', 'group']
+        fields = ['first_name', 'last_name', 'avatar', 'email', 'username', 'password', 'role', 'group']
         read_only_fields = ['group']
-        extra_kwargs ={
-            'password':{
+        extra_kwargs = {
+            'password': {
                 'write_only': True
             }
         }
 
-    def get_avatar_url(self, obj):
-        if obj.avatar:
-            return obj.avatar.url
-        return None
+    def get_avatar(self, obj):
+        return obj.avatar.url if obj.avatar else None
 
-    #Đăng ký
     def create(self, validated_data):
-        data = validated_data.copy()
-        role = data.get('role')
-        user = User(**data)
-        user.set_password(data['password'])
-        if role.id == 1:
+        role = validated_data.get('role')
+        user = User(**validated_data)
+        user.set_password(validated_data['password'])
+
+        if role and role.id == 1:
             user.is_superuser = True
+
         user.save()
         return user
 
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
+        rep.pop('password', None)
+        return rep
+
+
 
 class CommentSerializer(serializers.ModelSerializer):
-    user = UserSerializer()
-
     class Meta:
         model = Comment
-        fields = ['id','content', 'event','user']
+        fields = ['id', 'content', 'event', 'user', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at']
 
 
 class TicketSerializer(serializers.ModelSerializer):
@@ -211,11 +202,6 @@ class QRCheckInSerializer(serializers.ModelSerializer):
     #     if ticket.checked_in:
     #         raise serializers.ValidationError("Vé đã được check-in trước đó.")
     #     return ticket_code
-
-class DiscountTypeSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = DiscountType
-        fields = '__all__'
 
 class DiscountCodeSerializer(serializers.ModelSerializer):
     class Meta:

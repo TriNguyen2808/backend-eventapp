@@ -6,6 +6,9 @@ class OwnerIsAuthenticated(permissions.IsAuthenticated):
     def has_object_permission(self, request, view, obj):
         return (self.has_permission(request, view) and request.user == obj.user) or request.user.is_superuser
 
+class OwnerUser(permissions.IsAuthenticated):
+    def has_object_permission(self, request, view, obj):
+        return (self.has_permission(request, view) and request.user == obj) or request.user.is_superuser
 
 class IsAdmin(BasePermission):
     def has_permission(self, request, view):

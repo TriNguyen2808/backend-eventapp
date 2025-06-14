@@ -190,6 +190,7 @@ print(auto_crop_url)
 CLIENT_ID='sXxuwUxNqm98uCyOCJBUnDhByOPQguSqg7mkqZCj'
 CLIENT_SECRET='347hJ5MpNCCcuhiHCHyTIenIhFBdXRFfOaNnH22YE5vgfyzvdf7P7HDrUZdXmMzLOmFQk3UYb9qNrrARDZRvzuvVstH6yQbza0poOOHQ6ojqp9JZ24HXxd7KGCfGhyvC'
 
+
 #Cấu hình email
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'
@@ -230,3 +231,4 @@ LOGIN_REDIRECT_URL = '/'
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
 ALLOWED_HOSTS=['*']
+

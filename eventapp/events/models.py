@@ -179,53 +179,9 @@ class Ticket(models.Model):
                 return ticket_code
 
 
-class Notification(models.Model):  # thong bao
-    class NotificationType(models.TextChoices):  # enum loai thong bao
-        REMINDER = 'REMINDER'
-        UPDATE = 'UPDATE'
-        GENERAL = 'GENERAL'
-
-    user = models.ForeignKey(User, on_delete=models.CASCADE)  # nguoi nhan
-    message = models.TextField(null=True, blank=True) # noi dung thong bao
-    type = models.CharField(max_length=20, choices=NotificationType.choices)  # loai thong bao
-    is_read = models.BooleanField(default=False)  # da doc hay chua
-    created_at = models.DateTimeField(auto_now_add=True)  # thoi gian tao thong bao
-
-
 class Comment(Interaction):
     content = models.CharField(max_length=255, null=False)
 
-class Like(Interaction):
-    active=models.BooleanField(default=True)
-
-    class Meta:
-        unique_together = ('user','event')
-
-class Rating(Interaction):  # danh gia su kien
-    rate = models.PositiveSmallIntegerField(
-        validators=[MinValueValidator(1), MaxValueValidator(5)], default=0)  # diem danh gia (1-5)
-    comment = RichTextField(blank=True, null=True)  # binh luan
-
-
-
-class Report(models.Model):  # bao cao su kien
-    event = models.ForeignKey(Event, on_delete=models.CASCADE)  # su kien duoc bao cao
-    total_tickets_sold = models.IntegerField(default=0)  # so ve da ban
-    total_revenue = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)  # doanh thu
-    interest_score = models.IntegerField(default=0)  # chi so quan tam
-    generated_at = models.DateTimeField(auto_now_add=True)  # thoi diem tao bao cao
-
-
-class EventSuggestion(models.Model):  # goi y su kien theo so thich
-    class PreferenceType(models.TextChoices):  # enum loai so thich
-        MUSIC = 'MUSIC'
-        CONFERENCE = 'CONFERENCE'
-        SPORTS = 'SPORTS'
-        OTHER = 'OTHER'
-
-    user = models.ForeignKey(User, on_delete=models.CASCADE)  # nguoi dung
-    preferred_type = models.CharField(max_length=20, choices=PreferenceType.choices)  # so thich su kien
-    created_at = models.DateTimeField(auto_now_add=True)  # thoi gian tao goi y
 
 class DiscountType(models.Model):
     name = models.CharField(max_length=20, unique=True)  # 'FIXED', 'PERCENTAGE'
@@ -242,7 +198,7 @@ class DiscountCode(models.Model):
     groups = models.ManyToManyField(CustomerGroup, related_name='discount_codes')
     max_usage = models.PositiveIntegerField(default=1)
     discount_type = models.ForeignKey(DiscountType, on_delete=models.CASCADE, related_name='discount_types', null=True)
-    discount_value = models.FloatField(default=0)
+    discount_value = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     limit_discount = models.BooleanField(default=False)
     max_discount_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     min_total_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)

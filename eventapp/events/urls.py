@@ -13,10 +13,10 @@ routers.register('reminders', views.EventReminderViewSet, basename='reminders')
 routers.register('tickets', views.TicketViewSet, basename='tickets')
 routers.register('ticketclasses', views.TicketClassViewSet, basename='ticketclasses')
 routers.register('discountcodes', views.DiscountCodeViewSet, basename='discountcodes')
-routers.register('discounttypes', views.DiscountTypeViewSet, basename='discounttypes')
+#routers.register('discounttypes', views.DiscountTypeViewSet, basename='discounttypes')
 routers.register('reports', views.ReportViewSet, basename='reports')
 routers.register('payments', views.VNPayViewSet, basename='vnpay')
-routers.register('auth/google', views.GoogleLoginViewSet, basename='google-login')
+#routers.register('auth/google', views.GoogleLoginViewSet, basename='google-login')
 routers.register(('payment_log'), views.PaymentLogViewSet, basename='payment_log')
 
 urlpatterns = [

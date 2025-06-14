@@ -1,8 +1,6 @@
 from django.conf import settings
-from rest_framework.response import Response
 from rest_framework import status, viewsets, generics, parsers, permissions
 from rest_framework.decorators import action
-from rest_framework_simplejwt.tokens import RefreshToken
 from . import serializers, paginators, perms, vnpay
 from django.db.models import Count, Value, CharField, Sum
 from django.db.models.functions import Concat
@@ -10,278 +8,108 @@ from django.db import transaction
 from django.utils.timezone import now
 from datetime import timedelta
 from django.core.mail import send_mail, EmailMessage
-from django.http import HttpResponse, HttpResponseRedirect, JsonResponse
+from django.http import JsonResponse
 from oauth2_provider.views import TokenView
-from django.shortcuts import get_object_or_404
+from django.shortcuts import get_object_or_404, render, redirect
 import hmac, hashlib, json
-from oauth2_provider.models import AccessToken
-from io import BytesIO
 from decimal import Decimal
-
-import urllib
-import urllib.parse
-import urllib.request
 import random, requests
 from datetime import datetime
 from django.conf import settings
+from rest_framework.response import Response
 
-from django.shortcuts import render, redirect
+from .vnpay import vnpay
+from .utils import custom_response
+from .models import (
+    CustomerGroup, User, Event, TicketClass, Ticket, PaymentLog, DiscountCode,
+    Comment, UserPreference, EventType, PaymentVNPay, PaymentForm
+)
+import urllib
+import urllib.parse
+import urllib.request
 from urllib.parse import quote as urlquote
 
-from .models import PaymentForm
-from .vnpay import vnpay
-
-from .models import (
-    CustomerGroup, User, Event, TicketClass, Ticket, PaymentLog, Notification, Rating,
-    Report, EventSuggestion, DiscountType, DiscountCode, Like, Comment, UserPreference, EventType, PaymentVNPay
-)
-
-
 # Event.
-class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.UpdateAPIView):
-    serializer_class = serializers.EventDetailSerializer
+class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.UpdateAPIView, generics.CreateAPIView, generics.DestroyAPIView):
+    serializer_class = serializers.EventSerializer
     pagination_class = paginators.EventPaginator
-    permission_classes = [permissions.IsAuthenticated()]
 
     def get_queryset(self):
         return Event.objects.filter(active=True)
 
-    # Chung thuc
     def get_permissions(self):
-        if self.action in ['add_comment', 'like']:
-            return [permissions.IsAuthenticated(), perms.IsAttendee()]
-        elif self.action in ['create']:
-            return [permissions.IsAuthenticated(), perms.IsOrganizer()]
+        if self.action in ['create']:
+            return [perms.IsOrganizer()]
         elif self.action in ['destroy', 'update']:
             return [perms.OwnerIsAuthenticated()]
         return [permissions.IsAuthenticated()]
 
-    def get_serializer_class(self):
-        if self.action == 'create':
-            return serializers.EventSerializer
-        return serializers.EventDetailSerializer
-
-    # Like event
-    @action(methods=['post'], url_path='like', detail=True)
-    def like(self, request, pk):
-        like, created = Like.objects.get_or_create(user=request.user, event=self.get_object())
-        if not created:
-            like.active = not like.active
-            like.save()
-        return Response(serializers.EventDetailSerializer(self.get_object(), context={'request': request}).data,
-                        status=status.HTTP_200_OK)
-
-    def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset()
-        serializer = self.serializer_class(queryset, many=True, context={'request': request})
-        return Response({
-            "statusCode": 200,
-            "message": "Danh sách sự kiện",
-            "total": queryset.count(),
-            "data": serializer.data
-        }, status=status.HTTP_200_OK)
-
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        event = serializer.save()
-        image_url = request.build_absolute_uri(event.image.url) if event.image else None
-        response_data = {
-            "statusCode": 201,
-            "error": None,
-            "message": "Create an event",
-            "data": {
-                "id": event.id,
-                "name": event.name,
-                "description": event.description,
-                "location": event.location,
-                "image": image_url,
-                "start_time": event.start_time,
-                "end_time": event.end_time,
-                "event_type": event.event_type.name,
-                "createdAt": event.created_at.isoformat(),
-                "updatedAt": event.updated_at.isoformat() if event.updated_at else None,
-                "createdBy": event.user.email if event.user else None,
-            }
-        }
-        return Response(response_data, status=status.HTTP_201_CREATED)
-
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
-        try:
-            instance = self.get_object()
-        except Event.DoesNotExist:
-            return Response({
-                "statusCode": 404,
-                "message": "Không tìm thấy sự kiện để cập nhật"
-            }, status=status.HTTP_404_NOT_FOUND)
+        instance = self.get_object()
+
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
 
-        if serializer.is_valid():
-            serializer.save()
+        users = User.objects.filter(ticket__ticket_class__event=instance).distinct()
+        for user in users:
+            send_mail(
+                subject=f"[Thông báo] Sự kiện '{instance.name}' đã được cập nhật",
+                message=(
+                    f"Chào {user.get_full_name() or user.username},\n\n"
+                    f"Sự kiện bạn đã đặt vé ('{instance.name}') đã có cập nhật mới.\n"
+                    f"Thời gian: {instance.start_time.strftime('%d/%m/%Y %H:%M')} - {instance.end_time.strftime('%d/%m/%Y %H:%M')}\n"
+                    f"Địa điểm: {instance.location}\n\n"
+                    f"Vui lòng truy cập hệ thống để xem chi tiết.\n\n"
+                    f"Trân trọng,\nĐội ngũ tổ chức sự kiện"
+                ),
+                from_email=None,
+                recipient_list=[user.email],
+                fail_silently=False
+            )
 
-            # 🔔 Lấy người đã mua vé
-            users = User.objects.filter(ticket__ticket_class__event=instance).distinct()
+        return custom_response(200, "Cập nhật sự kiện thành công và gửi email cho người tham gia.", serializer.data)
 
-            for user in users:
-                # Gửi thông báo hệ thống
-                # Notification.objects.create(
-                #     user=user,
-                #     message=f"Sự kiện '{instance.name}' bạn đã mua vé vừa được cập nhật.",
-                # )
-
-                # Gửi email
-                send_mail(
-                    subject=f"[Thông báo] Sự kiện '{instance.name}' đã được cập nhật",
-                    message=(
-                        f"Chào {user.get_full_name() or user.username},\n\n"
-                        f"Sự kiện bạn đã đặt vé ('{instance.name}') đã có cập nhật mới.\n"
-                        f"Thời gian: {instance.start_time.strftime('%d/%m/%Y %H:%M')} - {instance.end_time.strftime('%d/%m/%Y %H:%M')}\n"
-                        f"Địa điểm: {instance.location}\n\n"
-                        f"Vui lòng truy cập hệ thống để xem chi tiết.\n\n"
-                        f"Trân trọng,\nĐội ngũ tổ chức sự kiện"
-                    ),
-                    from_email=None,  # Lấy từ DEFAULT_FROM_EMAIL
-                    recipient_list=[user.email],
-                    fail_silently=False
-                )
-
-            return Response({
-                "statusCode": 200,
-                "message": "Cập nhật sự kiện thành công và đã gửi thông báo + email cho người tham gia.",
-                "data": serializer.data
-            }, status=status.HTTP_200_OK)
-
-        return Response({
-            "message": "Cập nhật sự kiện thất bại",
-            "errors": serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    def destroy(self, request, pk=None):
-        try:
-            event = Event.objects.get(pk=pk)  # Bỏ lọc active
-        except Event.DoesNotExist:
-            return Response({
-                "statusCode": 404,
-                "error": "Event not found.",
-                "message": "Không tìm thấy sự kiện.",
-                "data": None,
-                "pk": pk,
-                "user's role": request.user.role.name
-            }, status=status.HTTP_404_NOT_FOUND)
-
-        # Optional: chỉ organizer tạo event mới được xóa
-        if request.user != event.user and not request.user.is_superuser:
-            return Response({"detail": "Bạn không có quyền xóa sự kiện này."},
-                            status=status.HTTP_403_FORBIDDEN)
-
-        event.delete()
-        return Response({
-            "statusCode": 204,
-            "error": None,
-            "message": "Event deleted successfully.",
-            "data": None
-        }, status=status.HTTP_204_NO_CONTENT)
-
-    # Nhan xet su kien
     @action(methods=['post'], url_path='comments', detail=True)
     def add_comment(self, request, pk):
         c = Comment.objects.create(user=request.user, event=self.get_object(), content=request.data.get('content'))
         event = Event.objects.get(pk=pk)
         event.update_popularity()
-        response_data = {
-            "statusCode": 201,
-            "error": None,
-            "message": "Create an event",
-            "data": {
-                "id": c.id,
-                "content": c.content,
-                "Full name": c.user.get_full_name(),
-                "Event's name": c.event.name,
-                "createdAt": c.created_at.isoformat(),
-                "updatedAt": c.updated_at.isoformat() if c.updated_at else None,
-            }
-        }
-        return Response(response_data, status=status.HTTP_201_CREATED)
+        serializer = serializers.CommentSerializer(c)
+        return custom_response(201, "Tạo bình luận thành công", serializer.data)
 
-    # Tim hang ve cua su kien
     @action(methods=['get'], detail=True)
     def ticketclasses(self, request, pk):
         event = self.get_object()
         if not event.active:
-            return Response({"detail": "Event is not active."}, status=status.HTTP_404_NOT_FOUND)
+            return custom_response(404, "Sự kiện không hoạt động.")
+        ticket_class = event.ticketclasses.all()
+        serializer = serializers.TicketClassSerializer(ticket_class, many=True)
+        return custom_response(200, "Danh sách hạng vé", serializer.data)
 
-        ticket_class = event.ticketclass_set.all()
-        return Response({
-            "statusCode": 200,
-            "error": None,
-            "message": "Fetch all ticket classes",
-            "data": serializers.TicketClassSerializer(ticket_class, many=True).data
-        },
-            status=status.HTTP_200_OK)
-
-    # Lọc danh sách comment của event
     @action(methods=['get'], detail=True)
     def list_comments(self, request, pk):
         event = self.get_object()
         if not event.active:
-            return Response({"detail": "Event is not active."}, status=status.HTTP_404_NOT_FOUND)
+            return custom_response(404, "Sự kiện không hoạt động.")
 
         comments = event.comment_set.all().order_by('-created_at')
         page = self.paginate_queryset(comments)
         if page is not None:
             serializer = serializers.CommentSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
 
-            page_size = self.paginator.page_size
-            current_page = self.paginator.page.number
-            total_items = self.paginator.page.paginator.count
-            total_pages = self.paginator.page.paginator.num_pages
-
-            return Response({
-                "statusCode": 200,
-                "error": None,
-                "message": "Fetch all comments",
-                "data": {
-                    "meta": {
-                        "page": current_page,
-                        "pageSize": page_size,
-                        "pages": total_pages,
-                        "total": total_items
-                    },
-                    "result": serializer.data
-                }
-            },
-                status=status.HTTP_200_OK)
-
-        # fallback nếu không phân trang
         serializer = serializers.CommentSerializer(comments, many=True)
-        return Response({
-            "statusCode": 200,
-            "error": None,
-            "message": "Fetch all comments",
-            "data": {
-                "meta": None,
-                "result": serializer.data
-            }
-        })
+        return custom_response(200, "Danh sách bình luận", serializer.data)
 
     @action(detail=False, methods=['get'], url_path='suggested', url_name='suggested-events')
     def suggested_events(self, request):
         user = request.user
-
-        # Cập nhật UserPreference cho user
-        event_type_counts = (
-            Ticket.objects.filter(user=user)
-            .values('ticket_class__event__event_type')
-            .annotate(total=Count('id'))
-            .filter(total__gte=5)
-        )
+        event_type_counts = Ticket.objects.filter(user=user).values('ticket_class__event__event_type').annotate(total=Count('id')).filter(total__gte=5)
 
         if event_type_counts:
-            # Xoá preferences cũ
             UserPreference.objects.filter(user=user).delete()
-
-            # Tạo lại các preferences mới
             for item in event_type_counts:
                 event_type_id = item['ticket_class__event__event_type']
                 if event_type_id:
@@ -291,39 +119,25 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.UpdateAPIVie
                     except EventType.DoesNotExist:
                         continue
 
-            # Gợi ý các sự kiện dựa trên preferences mới
             preferred_types = UserPreference.objects.filter(user=user).values_list('event_type', flat=True)
-            suggested_events = Event.objects.filter(
-                event_type__in=preferred_types,
-                active=True
-            ).order_by('start_time')
-
+            suggested_events = Event.objects.filter(event_type__in=preferred_types, active=True).order_by('start_time')
             serializer = self.get_serializer(suggested_events, many=True)
-            return Response({
-                "statusCode": 200,
-                "error": None,
+            return custom_response(200, "Gợi ý sự kiện dựa trên sở thích", {
                 "user": {
                     "full_name": user.get_full_name(),
                     "email": user.email,
                     "preferred_event_types": [str(cat) for cat in preferred_types]
                 },
-                "message": "Suggested events based on your preferences",
-                "data": serializer.data
-            }, status=status.HTTP_200_OK)
+                "result": serializer.data
+            })
 
-        return Response({"message": "Không đủ dữ liệu để gợi ý (số vé đặt quá ít <5)."},
-                        status=status.HTTP_204_NO_CONTENT)
+        return custom_response(204, "Không đủ dữ liệu để gợi ý (số vé đặt quá ít <5).")
 
     @action(detail=False, methods=['get'], url_path='hot', url_name='hot-events')
     def hot_events(self, request):
         hot_events = Event.objects.filter(active=True).order_by('-popularity_score')[:5]
         serializer = self.get_serializer(hot_events, many=True)
-        return Response({
-            "statusCode": 200,
-            "error": None,
-            "message": "hot events",
-            "data": serializer.data
-        }, status=status.HTTP_200_OK)
+        return custom_response(200, "Sự kiện nổi bật", serializer.data)
 
     @action(detail=False, methods=['get'], url_path='search')
     def search(self, request):
@@ -336,204 +150,104 @@ class EventViewSet(viewsets.ViewSet, generics.ListAPIView, generics.UpdateAPIVie
         max_price = request.query_params.get('max_price')
 
         if period == 'today':
-            queryset = Event.objects.filter(start_time__date=today)
+            queryset = queryset.filter(start_time__date=today)
         elif period == 'week':
             start = today
             end = today + timedelta(days=7)
-            queryset = Event.objects.filter(start_time__date__range=(start, end))
+            queryset = queryset.filter(start_time__date__range=(start, end))
         elif period == 'month':
             start = today.replace(day=1)
             end = (start + timedelta(days=31)).replace(day=1) - timedelta(days=1)
-            queryset = Event.objects.filter(start_time__date__range=(start, end))
+            queryset = queryset.filter(start_time__date__range=(start, end))
 
         if name:
-            queryset = Event.objects.filter(name__icontains=name)
+            queryset = queryset.filter(name__icontains=name)
 
         if event_type:
             queryset = queryset.filter(event_type__name__iexact=event_type)
 
-        if min_price or max_price:
-            # queryset = queryset.annotate(min=Min('ticketclass__price'))
+        if min_price:
+            queryset = queryset.filter(ticketclasses__price__gte=min_price)
+        if max_price:
+            queryset = queryset.filter(ticketclasses__price__lte=max_price)
 
-            if min_price:
-                queryset = queryset.filter(ticketclasses__price__gte=min_price)
-            if max_price:
-                queryset = queryset.filter(ticketclasses__price__lte=max_price)
-        if queryset:
-            serializer = self.get_serializer(queryset.distinct(), many=True)
-            return Response(serializer.data)
-        return Response("khong co su kien", status=status.HTTP_400_BAD_REQUEST)
+        queryset = queryset.distinct()
 
-
-# Xoa, Cap nhat nhan xet
+        if queryset.exists():
+            serializer = self.get_serializer(queryset, many=True)
+            return custom_response(200, "Kết quả tìm kiếm", serializer.data)
+        return custom_response(400, "Không có sự kiện phù hợp.")
 
 
-class CommentViewSet(viewsets.ViewSet):
+class CommentViewSet(viewsets.ViewSet, generics.UpdateAPIView, generics.ListAPIView, generics.DestroyAPIView):
     queryset = Comment.objects.all()
     serializer_class = serializers.CommentSerializer
     permission_classes = [perms.OwnerIsAuthenticated]
     pagination_class = paginators.CommentPaginator
 
-    def update(self, request, *args, **kwargs):
-        partial = kwargs.pop('partial', False)
-        instance = self.get_object()
-
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
-
-        response_data = {
-            "statusCode": 201,
-            "error": None,
-            "message": "Update an event",
-            "data": {
-                "id": instance.id,
-                "content": instance.content,
-                "Full name": instance.user.get_full_name(),
-                "Event's name": instance.event.name,
-                "createdAt": instance.created_at.isoformat(),
-                "updatedAt": instance.updated_at.isoformat() if instance.updated_at else None,
-            }
-        }
-        return Response(response_data, status=status.HTTP_200_OK)
-
-    def destroy(self, request, pk=None):
-        comment = self.get_queryset().filter(pk=pk).first()
-        if not comment:
-            return Response({
-                "statusCode": 404,
-                "error": "Comment not found.",
-                "message": "Không tìm thấy comment.",
-                "data": None,
-                "pk": pk
-            }, status=status.HTTP_404_NOT_FOUND)
-
-        # Kiểm tra quyền xóa: superuser hoặc chủ comment
-        if request.user != comment.user and not request.user.is_superuser:
-            return Response({
-                "detail": "Bạn không có quyền xóa comment này."
-            }, status=status.HTTP_403_FORBIDDEN)
-
-        comment.delete()
-        return Response({
-            "statusCode": 204,
-            "error": None,
-            "message": "Comment deleted successfully.",
-            "data": None
-        }, status=status.HTTP_204_NO_CONTENT)
 
     def list(self, request, *args, **kwargs):
-        # Trả thông tin người dùng đang request
-        user = request.user
+        queryset = self.get_queryset().order_by('-created_at')
+        page = self.paginate_queryset(queryset)
 
-        if not user.is_authenticated:
-            return Response({"detail": "Bạn cần đăng nhập."}, status=status.HTTP_401_UNAUTHORIZED)
-
-        comments = self.get_queryset()
-
-        page = self.paginate_queryset(comments)
         if page is not None:
-            serializer = serializers.CommentSerializer(page, many=True)
-
-            page_size = self.paginator.page_size
-            current_page = self.paginator.page.number
-            total_items = self.paginator.page.paginator.count
-            total_pages = self.paginator.page.paginator.num_pages
-
-            return Response({
-                "statusCode": 200,
-                "error": None,
-                "message": "Fetch all comments",
-                "data": {
-                    "meta": {
-                        "page": current_page,
-                        "pageSize": page_size,
-                        "pages": total_pages,
-                        "total": total_items
-                    },
-                    "result": serializer.data
-                }
-            },
-                status=status.HTTP_200_OK)
-
-        # fallback nếu không phân trang
-        serializer = serializers.CommentSerializer(comments, many=True)
-        return Response({
-            "statusCode": 200,
-            "error": None,
-            "message": "Fetch all comments",
-            "data": {
-                "meta": None,
-                "result": serializer.data
+            serializer = self.get_serializer(page, many=True)
+            meta = {
+                "page": self.paginator.page.number,
+                "pageSize": self.paginator.page_size,
+                "pages": self.paginator.page.paginator.num_pages,
+                "total": self.paginator.page.paginator.count
             }
-        })
+            return custom_response(
+                status_code=200,
+                message="Danh sách bình luận có phân trang.",
+                data={"meta": meta, "result": serializer.data}
+            )
+
+        serializer = self.get_serializer(queryset, many=True)
+        return custom_response(
+            status_code=200,
+            message="Danh sách bình luận đầy đủ.",
+            data={"result": serializer.data}
+        )
 
 
-class UserViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.UpdateAPIView):
-    queryset = User.objects.filter(is_active=True).all()
-    serializer_class = serializers.UserSerializer
+class UserViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.UpdateAPIView, generics.ListAPIView, generics.DestroyAPIView):
     parser_classes = [parsers.MultiPartParser]
     pagination_class = paginators.EventPaginator
 
+    def get_queryset(self):
+        return User.objects.filter(is_active=True)
 
-    def update(self, request, *args, **kwargs):
-        partial = kwargs.pop('partial', False)
-        instance = self.get_object()
+    def get_permissions(self):
+        if self.action in ['destroy']:
+            return [perms.OwnerUser()]
+        if self.action in ['update']:
+            return [perms.OwnerIsAuthenticated()]
+        elif self.action in ['search_users']:
+            return [perms.IsAdmin()]
+        elif self.action in ['create']:
+            return [permissions.AllowAny()]
+        return [permissions.IsAuthenticated()]
 
-        # Kiểm tra nếu người dùng không phải owner hoặc admin
-        if request.user != instance and not request.user.is_superuser:
-            return Response({
-                "detail": "Bạn không có quyền chỉnh sửa người dùng này."
-            }, status=status.HTTP_403_FORBIDDEN)
+    def get_serializer_class(self):
+        return serializers.UserSerializer
 
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
-        serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
 
-        response_data = {
-            "statusCode": 200,
-            "error": None,
-            "message": "Updated user",
-            "data": {
-                "user": serializer.data,
-                "updatedAt": instance.updated_at.isoformat() if hasattr(instance,
-                                                                        'updated_at') and instance.updated_at else None,
-            }
-        }
-        return Response(response_data, status=status.HTTP_200_OK)
-
-    def destroy(self, request, pk=None):
-        try:
-            user = User.objects.get(pk=pk)
-        except User.DoesNotExist:
-            return Response({"detail": "Không tìm thấy người dùng."}, status=status.HTTP_404_NOT_FOUND)
-
-        if not request.user.is_superuser and request.user != user:
-            return Response({
-                "detail": "Bạn không có quyền xóa người dùng này."
-            }, status=status.HTTP_403_FORBIDDEN)
-
-        user.delete()
-        return Response({
-            "statusCode": 204,
-            "message": "Xoá người dùng thành công.",
-            "data": None
-        }, status=status.HTTP_204_NO_CONTENT)
-
-    @action(methods=['get'], url_name='current-user', detail=False)
+    @action(methods=['get'], url_path='current_user', detail=False)
     def current_user(self, request):
-        return Response(serializers.UserSerializer(request.user).data)
+        return custom_response(200, "Thông tin người dùng hiện tại", self.get_serializer(request.user).data)
+
+    @action(methods=['get'], url_path='discountcodes', detail=False)
+    def discountcodes(self, request):
+        discounts = DiscountCode.objects.filter(groups=request.user.group)
+        serializer = serializers.DiscountCodeSerializer(discounts, many=True, context={'request': request})
+        return custom_response(200, "Danh sách mã giảm giá theo nhóm người dùng", serializer.data)
 
     @action(detail=False, methods=['get'], url_path='search')
     def search_users(self, request):
-        if not request.user.is_superuser:
-            return Response({
-                "detail": "Bạn không có quyền tìm kiếm người dùng."
-            }, status=status.HTTP_403_FORBIDDEN)
-
         name = request.query_params.get('name')
         role = request.query_params.get('role')
-
         users = User.objects.all()
 
         if name:
@@ -544,144 +258,58 @@ class UserViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.UpdateAPIVi
         if role:
             users = users.filter(role__name__iexact=role)
 
-        serializer = serializers.UserSerializer(users, many=True)
-        return Response({
-            "statusCode": 200,
-            "error": None,
-            "message": "Danh sách người dùng tìm được.",
+        serializer = self.get_serializer(users, many=True)
+        return custom_response(200, "Danh sách người dùng tìm được", {
             "total": users.count(),
             "data": serializer.data
         })
 
+    @action(detail=True, methods=['get'], url_path='events')
+    def events(self, request, pk=None):
+        user = get_object_or_404(User, pk=pk)
+        events = Event.objects.filter(user=user)
+        page = self.paginate_queryset(events)
+        if page is not None:
+            serializer = serializers.EventSerializer(page, many=True)
+            return self.get_paginated_response({
+                "message": f"Sự kiện do người dùng {user.username} tạo",
+                "data": serializer.data
+            })
 
-class GoogleLoginViewSet(viewsets.ViewSet):
-    @action(detail=False, methods=['post'], url_path='login')
-    def login_with_google(self, request):
-        id_token = request.data.get('id_token')
-        if not id_token:
-            return Response({'error': 'Thiếu id_token'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Validate token with Google
-        google_response = requests.get(f'https://oauth2.googleapis.com/tokeninfo?id_token={id_token}')
-        if google_response.status_code != 200:
-            return Response({'error': 'id_token không hợp lệ'}, status=status.HTTP_400_BAD_REQUEST)
-
-        user_info = google_response.json()
-        email = user_info.get('email')
-        name = user_info.get('name')
-
-        if not email:
-            return Response({'error': 'Không nhận được email từ Google'}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Tạo hoặc lấy user
-        user, created = User.objects.get_or_create(email=email, defaults={'username': email, 'first_name': name})
-        if created:
-            user.set_unusable_password()
-            user.save()
-
-        # Tạo JWT
-        refresh = RefreshToken.for_user(user)
-        return Response({
-            'statusCode': 200,
-            'message': 'Đăng nhập thành công',
-            'data': {
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
-                'user': {
-                    'id': user.id,
-                    'email': user.email,
-                    'name': user.get_full_name()
-                }
-            }
+        serializer = serializers.EventSerializer(events, many=True)
+        return custom_response(200, f"Sự kiện do người dùng {user.username} tạo", {
+            "total": events.count(),
+            "data": serializer.data
         })
 
-
 # Tạo hạng vé cho event (lọc theo id) events/<int:event_id>/add-ticket-class/
-class TicketClassViewSet(viewsets.ViewSet, generics.UpdateAPIView):
-    queryset = TicketClass.objects.all()
+class TicketClassViewSet(viewsets.ViewSet, generics.ListAPIView, generics.CreateAPIView, generics.UpdateAPIView, generics.DestroyAPIView):
     serializer_class = serializers.TicketClassSerializer
-    permission_classes = [perms.IsOrganizer]
+
+    def get_queryset(self):
+        event_id = self.kwargs.get('id')
+        return TicketClass.objects.filter(event_id=event_id)
+
+    def get_permissions(self):
+        if self.action in ['create']:
+            return [perms.IsOrganizer()]
+        elif self.action in ['update', 'destroy']:
+            return [perms.OwnerIsAuthenticated()]
+        return [perms.IsAuthenticated()]
 
     def create(self, request, *args, **kwargs):
         event_id = self.kwargs.get('id')
         try:
             event = Event.objects.get(id=event_id)
         except Event.DoesNotExist:
-            return Response({f"'detail': 'Event not found'{event_id}"}, status=status.HTTP_404_NOT_FOUND)
+            return custom_response(404, f"Không tìm thấy sự kiện với id: {event_id}")
 
-        if (event.user != request.user) and not request.user.is_superuser:
-            return Response({
-                'statusCode': 403,
-                'detail': 'Bạn không phải là người tổ chức sự kiện này.'
-            }, status=status.HTTP_403_FORBIDDEN)
-
-        name = request.data.get('name', '').strip()
-        duplicate_ticket = TicketClass.objects.filter(event=event, name__iexact=name).first()
-        if TicketClass.objects.filter(event=event, name__iexact=name).exists():
-            return Response({
-                'statusCode': 400,
-                'error': 'Hạng vé với tên này đã tồn tại cho sự kiện.',
-                'event': event.name,
-                'duplicate_id': duplicate_ticket.id
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        serializer = self.serializer_class(data=request.data, context={'event': event})
-
-        if serializer.is_valid():
-            serializer.save()
-            return Response({
-                "statusCode": 201,
-                "error": None,
-                "message": "Tạo hạng vé thành công",
-                "user": request.user.get_full_name(),
-                "event": event.name,
-                "data": serializer.data
-            }, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-    def update(self, request, *args, **kwargs):
-        partial = kwargs.pop('partial', False)
-        instance = self.get_object()
-
-        # Kiểm tra nếu người dùng không phải owner hoặc admin
-        if request.user != instance.event.user and not request.user.is_superuser:
-            return Response({
-                "detail": "Bạn không có quyền chỉnh sửa sự kiện này."
-            }, status=status.HTTP_403_FORBIDDEN)
-
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer = self.get_serializer(data=request.data, context={'event': event})
         serializer.is_valid(raise_exception=True)
-        self.perform_update(serializer)
+        ticket_class = serializer.save()
 
-        response_data = {
-            "statusCode": 200,
-            "error": None,
-            "message": "Updated ticketclass",
-            "data": {
-                "ticket class": serializer.data,
-                "updatedAt": instance.updated_at.isoformat() if hasattr(instance,
-                                                                        'updated_at') and instance.updated_at else None,
-            }
-        }
-        return Response(response_data, status=status.HTTP_200_OK)
+        return custom_response(201, "Tạo hạng vé thành công", serializer.data)
 
-    def destroy(self, request, *args, **kwargs):
-        try:
-            ticketclass = self.get_object()
-        except TicketClass.DoesNotExist:
-            return Response({"detail": "Không tìm thấy hạng vé."}, status=status.HTTP_404_NOT_FOUND)
-
-        if not request.user.is_superuser and request.user != ticketclass.event.user:
-            return Response({
-                "detail": "Bạn không có quyền xóa hạng vé này."
-            }, status=status.HTTP_403_FORBIDDEN)
-
-        ticketclass.delete()
-        return Response({
-            "statusCode": 204,
-            "message": "Xoá hạng vé thành công.",
-            "data": None
-        }, status=status.HTTP_204_NO_CONTENT)
 
 
 # Thong bao
@@ -691,9 +319,9 @@ class EventReminderViewSet(viewsets.ViewSet):
     @action(methods=['post'], detail=False)
     def send_reminder(self, request):
         today = now()
-        target_date = today + timedelta(days=2)
+        target_date = today + timedelta(days=3)
 
-        events = Event.objects.filter(start_time__date=target_date, active=True)
+        events = Event.objects.filter(start_time__date__lte=target_date, active=True)
         sent_count = 0
         for event in events:
             tickets = Ticket.objects.filter(ticket_class__event=event).select_related('user')
@@ -715,12 +343,15 @@ class EventReminderViewSet(viewsets.ViewSet):
                     )
                 sent_count += 1
 
-        return Response({"message": f"Đã gửi {sent_count} email nhắc nhở thành công. {target_date}"},
-                        status=status.HTTP_200_OK)
+        return custom_response(
+            200,
+            f"Đã gửi {sent_count} email nhắc nhở thành công.",
+            {"target_date": target_date.strftime('%Y-%m-%d')}
+        )
 
 
 # Dat ve
-class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.DestroyAPIView):
+class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.DestroyAPIView, generics.ListAPIView):
     queryset = Ticket.objects.all()
     serializer_class = serializers.TicketSerializer
     permission_classes = [permissions.IsAuthenticated()]
@@ -745,19 +376,6 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.DestroyAP
             "data": serializer.data
         }, status=status.HTTP_200_OK)
 
-    def destroy(self, request, pk=None):
-        try:
-            ticket = Ticket.objects.get(pk=pk)  # Bỏ lọc active
-        except Ticket.DoesNotExist:
-            return Response({"detail": "Không tìm thấy vé."}, status=status.HTTP_404_NOT_FOUND)
-
-        ticket.delete()
-        return Response({
-            "statusCode": 204,
-            "message": "Xoá mã vé thành công.",
-            "data": None
-        }, status=status.HTTP_204_NO_CONTENT)
-
     @transaction.atomic
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data, context={'request': request})
@@ -777,31 +395,19 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.DestroyAP
                 discount = DiscountCode.objects.get(code=discount_code_str, valid_from__lte=now(),
                                                     valid_to__gte=now())
             except DiscountCode.DoesNotExist:
-                return Response({
-                    "statusCode": 400,
-                    "error": "Mã giảm giá không hợp lệ hoặc đã hết hạn."
-                }, status=status.HTTP_400_BAD_REQUEST)
+                return custom_response(400, "Mã giảm giá không hợp lệ hoặc đã hết hạn.")
 
             # Kiểm tra người dùng đã dùng mã chưa
             if discount.used_by.filter(id=user.id).exists():
-                return Response({
-                    "statusCode": 400,
-                    "error": "Bạn đã sử dụng mã giảm giá này rồi."
-                }, status=status.HTTP_400_BAD_REQUEST)
+                return custom_response(400, "Bạn đã sử dụng mã giảm giá này rồi.")
 
             # Kiểm tra sự kiện
             if discount.events.exists() and event not in discount.events.all():
-                return Response({
-                    "statusCode": 400,
-                    "error": "Mã này không áp dụng cho sự kiện này."
-                }, status=status.HTTP_400_BAD_REQUEST)
+                return custom_response(400, "Mã này không áp dụng cho sự kiện này.")
 
             # Kiểm tra nhóm
             if not discount.groups.filter(id=user.group.id).exists():
-                return Response({
-                    "statusCode": 400,
-                    "error": "Bạn không thuộc nhóm được áp dụng mã này."
-                }, status=status.HTTP_400_BAD_REQUEST)
+                return custom_response(400, "Bạn không thuộc nhóm được áp dụng mã này.")
 
             # Tính giá sau giảm
             if discount.discount_type.name == 'AMOUNT':
@@ -840,9 +446,7 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.DestroyAP
 
         vnpay_payment_url = vnp.get_payment_url(settings.VNPAY_PAYMENT_URL, settings.VNPAY_HASH_SECRET_KEY)
 
-        return Response({
-            "statusCode": 200,
-            "message": "Vui lòng thanh toán qua VNPay.",
+        return custom_response(200, "Vui lòng thanh toán qua VNPay.", {
             "payment_url": vnpay_payment_url,
             "payment_log": payment_log.id
         })
@@ -852,7 +456,7 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.DestroyAP
         user = request.user
         tickets = Ticket.objects.filter(user=user)
         serializer = self.get_serializer(tickets, many=True)
-        return Response(serializer.data)
+        return custom_response(200, "Danh sách vé của tôi", serializer.data)
 
     # check in
     @action(detail=False, methods=['post'], url_path='check-in')
@@ -860,39 +464,35 @@ class TicketViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.DestroyAP
         ticket_code = request.data.get("ticket_code")
 
         if not ticket_code:
-            return Response({"error": "Vui lòng cung cấp mã vé."}, status=status.HTTP_400_BAD_REQUEST)
+            return custom_response(400, "Vui lòng cung cấp mã vé.")
 
         try:
             ticket = Ticket.objects.select_related("ticket_class__event", "user").get(ticket_code=ticket_code)
         except Ticket.DoesNotExist:
-            return Response({"error": "Mã vé không hợp lệ."}, status=status.HTTP_404_NOT_FOUND)
+            return custom_response(404, "Mã vé không hợp lệ.")
 
         if ticket.is_checked_in:
-            return Response({"error": "Vé đã được check-in."}, status=status.HTTP_400_BAD_REQUEST)
+            return custom_response(400, "Vé đã được check-in.")
 
         event = ticket.ticket_class.event
         if event.start_time > now():
-            return Response(
-                f'error: Sự kiện chưa bắt đầu. Ngày bắt đầu sự kiện: {event.start_time}, Ngày hiện tại: {now()}',
-                status=status.HTTP_400_BAD_REQUEST)
+            return custom_response(400, f"Sự kiện chưa bắt đầu. Ngày bắt đầu: {event.start_time}, hiện tại: {now()}")
 
         # Cập nhật trạng thái check-in
         ticket.is_checked_in = True
         ticket.check_in_time = now()
         ticket.save()
 
-        return Response({
-            "message": "Check-in thành công.",
+        return custom_response(200, "Check-in thành công", {
             "ticket_code": ticket.ticket_code,
             "user": ticket.user.get_full_name() or ticket.user.username,
             "event": event.name,
             "ticket_class": ticket.ticket_class.name,
             "check_in_time": ticket.check_in_time,
-        }, status=status.HTTP_200_OK)
+        })
 
 
 class VNPayViewSet(viewsets.ViewSet):
-
     @transaction.atomic
     @action(detail=False, methods=['get'], url_path='vnpay-return')
     def vnpay_return(self, request):
@@ -1077,134 +677,49 @@ class CustomTokenView(TokenView):
         return response
 
 
-class DiscountTypeViewSet(viewsets.ModelViewSet):
-    queryset = DiscountType.objects.all()
-    serializer_class = serializers.DiscountTypeSerializer
-    permission_classes = [perms.IsAdmin]
+class DiscountCodeViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.DestroyAPIView, generics.ListAPIView):
+    queryset = DiscountCode.objects.all()
+    serializer_class = serializers.DiscountCodeSerializer
+
+    def get_permissions(self):
+        if self.action in ['create', 'destroy', 'list']:
+            return [perms.IsAdmin()]
+        return super().get_permissions()
+
+    def get_serializer_class(self):
+        return self.serializer_class
 
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()
         serializer = self.get_serializer(queryset, many=True)
-        return Response({
-            "statusCode": 200,
-            "error": None,
-            "message": "Danh sách loại mã giảm giá",
-            "data": serializer.data
-        }, status=status.HTTP_200_OK)
-
-    def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({
-                "statusCode": 201,
-                "error": None,
-                "message": "Tạo loại mã giảm giá thành công",
-                "data": serializer.data
-            }, status=status.HTTP_201_CREATED)
-        return Response({
-            "statusCode": 400,
-            "message": "Tạo loại mã giảm giá thất bại",
-            "errors": serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    def retrieve(self, request, *args, **kwargs):
-        instance = self.get_object()
-        serializer = self.get_serializer(instance)
-        return Response({
-            "statusCode": 200,
-            "message": "Chi tiết loại mã giảm giá",
-            "data": serializer.data
-        }, status=status.HTTP_200_OK)
-
-    def update(self, request, *args, **kwargs):
-        partial = kwargs.pop('partial', False)
-        instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({
-                "statusCode": 200,
-                "message": "Cập nhật loại mã giảm giá thành công",
-                "data": serializer.data
-            }, status=status.HTTP_200_OK)
-        return Response({
-            "message": "Cập nhật loại mã giảm giá thất bại",
-            "errors": serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    def destroy(self, request, *args, **kwargs):
-        try:
-            instance = self.get_object()
-        except DiscountType.DoesNotExist:
-            return Response({
-                "statusCode": 404,
-                "error": "Event not found.",
-                "message": "Không tìm thấy sự kiện.",
-                "data": None,
-            }, status=status.HTTP_404_NOT_FOUND)
-
-        instance.delete()
-        return Response({
-            "statusCode": 200,
-            "message": "Xóa loại mã giảm giá thành công",
-            "data": None
-        }, status=status.HTTP_204_NO_CONTENT)
-
-
-class DiscountCodeViewSet(viewsets.ViewSet):
-    queryset = DiscountCode.objects.all()
-    serializer_class = serializers.DiscountCodeSerializer
-    permission_classes = [perms.IsAdmin]
-
-    def perform_create(self, serializer):
-        serializer.save()
-
-    def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset()
-        serializer = self.serializer_class(queryset, many=True)
-        return Response({
-            "statusCode": 200,
-            "message": "Danh sách mã giảm giá",
-            "total": queryset.count(),
-            "data": serializer.data
-        }, status=status.HTTP_200_OK)
+        return custom_response(
+            200,
+            "Danh sách mã giảm giá",
+            serializer.data,
+            extra={"total": queryset.count()}
+        )
 
     def create(self, request, *args, **kwargs):
         data = request.data.copy()
-        # Nếu không gửi field events hoặc gửi rỗng thì tự động thêm tất cả sự kiện
+
         if not data.get("events"):
-            all_event_ids = list(Event.objects.values_list('id', flat=True))
-            data['events'] = all_event_ids
-
+            data["events"] = list(Event.objects.values_list("id", flat=True))
         if not data.get("groups"):
-            all_groups_ids = list(CustomerGroup.objects.values_list('id', flat=True))
-            data['groups'] = all_groups_ids
+            data["groups"] = list(CustomerGroup.objects.values_list("id", flat=True))
 
-        serializer = self.serializer_class(data=data)
+        serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
+        discount_code = serializer.save()
 
-        return Response({
-            "statusCode": 201,
-            "error": None,
-            "message": "Tạo mã giảm giá thành công",
-            "user": request.user.id,
-            "data": serializer.data
-        }, status=status.HTTP_201_CREATED)
+        return custom_response(
+            201,
+            "Tạo mã giảm giá thành công",
+            self.get_serializer(discount_code).data,
+            extra={"user": request.user.id}
+        )
 
-    def destroy(self, request, pk=None):
-        try:
-            discount = DiscountCode.objects.get(pk=pk)  # Bỏ lọc active
-        except DiscountCode.DoesNotExist:
-            return Response({"detail": "Không tìm thấy mã giảm giá."}, status=status.HTTP_404_NOT_FOUND)
 
-        discount.delete()
-        return Response({
-            "statusCode": 204,
-            "message": "Xoá mã giảm giá thành công.",
-            "data": None
-        }, status=status.HTTP_204_NO_CONTENT)
+
 
 
 
@@ -1215,7 +730,7 @@ class ReportViewSet(viewsets.ViewSet):
         if user.role.id == 1:  # Admin
             return Event.objects.all()
         elif user.role.id == 2:  # Organizer
-            return Event.objects.filter(organizer=user)
+            return Event.objects.filter(user=user)
         return Event.objects.none()
 
     @action(detail=False, methods=['get'], url_path='monthly')
@@ -1224,13 +739,12 @@ class ReportViewSet(viewsets.ViewSet):
             year = int(request.query_params.get('year'))
             month = int(request.query_params.get('month'))
         except (TypeError, ValueError):
-            return Response({"error": "Vui lòng cung cấp đúng định dạng ?year=YYYY&month=MM"}, status=400)
+            return custom_response(400, "Vui lòng cung cấp đúng định dạng ?year=YYYY&month=MM")
 
         user = request.user
         events = self.get_filtered_events(user).filter(start_time__year=year, start_time__month=month)
 
         data = []
-
         for event in events:
             ticket_count = Ticket.objects.filter(
                 ticket_class__event=event,
@@ -1258,25 +772,26 @@ class ReportViewSet(viewsets.ViewSet):
                 'total_comments': comment_count
             })
 
-        return Response({
-            "year": year,
-            "month": month,
-            "total_event": events.count(),
-            "event_statistics": data
-        })
+        return custom_response(200,"Thống kê theo tháng",
+            {
+                "year": year,
+                "month": month,
+                "total_event": events.count(),
+                "event_statistics": data
+            }
+        )
 
     @action(detail=False, methods=['get'], url_path='yearly')
     def report_by_year(self, request):
         try:
             year = int(request.query_params.get('year'))
         except (TypeError, ValueError):
-            return Response({"error": "Vui lòng cung cấp đúng định dạng ?year=YYYY"}, status=400)
+            return custom_response(400, "Vui lòng cung cấp đúng định dạng ?year=YYYY")
 
         user = request.user
         events = self.get_filtered_events(user).filter(start_time__year=year)
 
         data = []
-
         for event in events:
             ticket_count = Ticket.objects.filter(
                 ticket_class__event=event,
@@ -1301,11 +816,14 @@ class ReportViewSet(viewsets.ViewSet):
                 'total_comments': comment_count
             })
 
-        return Response({
-            "year": year,
-            "total_event": events.count(),
-            "event_statistics": data
-        })
+        return custom_response(200,"Thống kê theo năm",
+            {
+                "year": year,
+                "total_event": events.count(),
+                "event_statistics": data
+            }
+        )
+
 
 
 # Thanh toan VNPay
