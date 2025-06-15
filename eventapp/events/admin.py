@@ -6,8 +6,8 @@ from django.utils.html import mark_safe
 from django import forms
 from ckeditor_uploader.widgets import CKEditorUploadingWidget
 from .models import (
-    Role, Event,TicketClass, Ticket, PaymentLog, Notification, Rating,
-    Report, EventSuggestion,DiscountType, DiscountCode, Comment, Like, EventType, UserPreference,
+    Role, Event,TicketClass, Ticket, PaymentLog,
+    DiscountType, DiscountCode, Comment, EventType, UserPreference,
     PaymentVNPay
 )
 
@@ -15,13 +15,6 @@ User = get_user_model()
 
 class TicketClassInline(admin.TabularInline):  # Hoac admin.StackedInline
     model = TicketClass
-
-class NotificationForm(forms.ModelForm):
-    message = forms.CharField(widget=CKEditorUploadingWidget)
-
-    class Meta:
-        model = Notification
-        fields = '__all__'
 
 class UserForm(forms.ModelForm):
     class Meta:
@@ -86,14 +79,6 @@ class TicketAdmin(admin.ModelAdmin):
             'fields': ('ticket_class', 'user', 'is_checked_in')
         })
     ]
-
-
-class NotificationAdmin(admin.ModelAdmin):
-    list_display = ['id', 'user', 'type', 'is_read', 'created_at']
-    search_fields = ['message']
-    list_editable = ['is_read']
-    form = NotificationForm
-
 
 class RatingAdmin(admin.ModelAdmin):
     list_display = ['id', 'event', 'user', 'rate', 'created_at']
@@ -170,14 +155,9 @@ admin.site.register(Event, EventAdmin)
 admin.site.register(TicketClass, TicketClassAdmin)
 admin.site.register(Ticket, TicketAdmin)
 # admin.site.register(Payment, PaymentAdmin)
-admin.site.register(Notification, NotificationAdmin)
-admin.site.register(Rating, RatingAdmin)
-admin.site.register(Report, ReportAdmin)
 #admin.site.register(ChatMessage, ChatMessageAdmin)
-admin.site.register(EventSuggestion, EventSuggestionAdmin)
 #admin.site.register(DiscountCode, DiscountCodeAdmin)
 admin.site.register(Comment, CommentAdmin)
-admin.site.register(Like, LikeAdmin)
 admin.site.register(EventType, EventTypeAdmin)
 admin.site.register(UserPreference, UserPreferenceAdmin)
 admin.site.register(DiscountType, DiscountTypeAdmin)

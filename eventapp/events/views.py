@@ -264,9 +264,9 @@ class UserViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.UpdateAPIVi
             "data": serializer.data
         })
 
-    @action(detail=True, methods=['get'], url_path='events')
-    def events(self, request, pk=None):
-        user = get_object_or_404(User, pk=pk)
+    @action(detail=False, methods=['get'], url_path='events')
+    def events(self, request):
+        user = request.user
         events = Event.objects.filter(user=user)
         page = self.paginate_queryset(events)
         if page is not None:
@@ -278,6 +278,27 @@ class UserViewSet(viewsets.ViewSet, generics.CreateAPIView, generics.UpdateAPIVi
 
         serializer = serializers.EventSerializer(events, many=True)
         return custom_response(200, f"Sự kiện do người dùng {user.username} tạo", {
+            "total": events.count(),
+            "data": serializer.data
+        })
+
+    @action(detail=False, methods=['get'], url_path='purchased-events')
+    def purchased_events(self, request):
+        user = request.user
+
+        # Lấy danh sách sự kiện mà người dùng đã mua vé
+        events = Event.objects.filter(ticketclasses__tickets__user=user).distinct()
+        # Phân trang nếu cần
+        page = self.paginate_queryset(events)
+        if page is not None:
+            serializer = serializers.EventSerializer(page, many=True, context={'request': request})
+            return self.get_paginated_response({
+                "message": f"Sự kiện đã mua vé bởi {user.username}",
+                "data": serializer.data
+            })
+
+        serializer = serializers.EventSerializer(events, many=True, context={'request': request})
+        return custom_response(200, f"Sự kiện đã mua vé bởi {user.username}", {
             "total": events.count(),
             "data": serializer.data
         })
